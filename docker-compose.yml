@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: callradar
+      POSTGRES_USER: callradar
+      POSTGRES_PASSWORD: callradar
+    ports: ["5432:5432"]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://callradar:callradar@db:5432/callradar
+      MEDIA_ROOT: /data
+    ports: ["8000:8000"]
+    volumes: [./data:/data]
+    depends_on: [db]
+  web:
+    build: ./frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports: ["3000:3000"]
+    depends_on: [api]
+volumes:
+  postgres_data:
