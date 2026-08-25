@@ -119,6 +119,22 @@ def test_polite_close_does_not_mask_transaction_amount_mismatch() -> None:
     assert not any(item.mood == "satisfied" for item in validated.mood_events)
 
 
+def test_matching_transfer_amount_is_resolved_and_satisfied() -> None:
+    segments = [
+        segment(1, "customer", "Transfer $86 from checking to savings.", 10_000),
+        segment(2, "agent", "$86 has been transferred from checking to savings.", 20_000),
+        segment(3, "customer", "No, that'll be it. Thank you.", 30_000),
+    ]
+
+    candidate = RuleAnalysisEngine().analyse(segments)
+    validated = validate_candidate_evidence(candidate, {item.id: item for item in segments}, RuleAnalysisEngine())
+
+    assert validated.resolution_status == "RESOLVED"
+    assert validated.resolution_evidence is not None
+    assert not validated.attention_contributions
+    assert validated.mood_events[-1].mood == "satisfied"
+
+
 def test_appointment_request_maps_to_general_inquiry() -> None:
     source = segment(1, "customer", "I would like to schedule an appointment.")
 
