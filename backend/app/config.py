@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     media_url_ttl_seconds: int = 900
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
+    openai_timeout_seconds: float = 45.0
     analysis_provider: str = "openai"  # "openai" or "rules" for offline/dev
     validate_evidence_with_llm: bool = True
     whisper_model: str = "small"

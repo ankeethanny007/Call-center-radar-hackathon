@@ -243,6 +243,10 @@ class RuleAnalysisEngine:
                     ),
                 )
             )
+        elif requested_amount and confirmed_amount and requested_amount[1] == confirmed_amount[1]:
+            confirmation_segment, _confirmation_cents = confirmed_amount
+            candidate.resolution_status = "RESOLVED"
+            candidate.resolution_evidence = pointer(confirmation_segment)
 
         escalation = first_match(customers, ("manager", "supervisor", "escalate", "complaint"))
         repeat_question = first_match(customers, ("already told", "already explained", "repeat myself", "third time"))
@@ -282,7 +286,11 @@ class OpenAIAnalysisEngine:
         if not settings.openai_api_key:
             raise RuntimeError("OPENAI_API_KEY is required when ANALYSIS_PROVIDER=openai")
         from openai import OpenAI
-        self.client = OpenAI(api_key=settings.openai_api_key)
+        self.client = OpenAI(
+            api_key=settings.openai_api_key,
+            timeout=settings.openai_timeout_seconds,
+            max_retries=1,
+        )
 
     def analyse(self, segments: list[TranscriptSegment], repeat_call_count: int = 0, duration_seconds: float | None = None) -> AnalysisCandidate:
         transcript = "\n".join(
