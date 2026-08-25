@@ -20,8 +20,8 @@ class Settings(BaseSettings):
     whisper_model: str = "small"
     whisper_compute_type: str = "int8"
     whisper_download_root: Path = Path("./work/models")
-    whisper_utterance_gap_seconds: float = 1.0
-    whisper_max_utterance_seconds: float = 12.0
+    whisper_utterance_gap_seconds: float = 0.8
+    whisper_max_utterance_seconds: float = 8.0
     storage_provider: str = "local"  # local or supabase
     supabase_url: str | None = None
     supabase_service_key: str | None = None
