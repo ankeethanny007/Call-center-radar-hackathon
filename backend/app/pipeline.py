@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
 
-from .analysis import ATTENTION_WEIGHTS, AnalysisCandidate, EvidencePointer, attention_band, get_analysis_engine, pointer_is_valid, validate_candidate_evidence
+from .analysis import ATTENTION_WEIGHTS, AnalysisCandidate, EvidencePointer, RuleAnalysisEngine, attention_band, get_analysis_engine, pointer_is_valid, validate_candidate_evidence
 from .config import settings
 from .models import (
     Agent,
@@ -476,7 +476,14 @@ def process_call(db: Session, call: Call, media_root: Path) -> None:
         db.refresh(call)
         transcript = list(call.transcript_segments)
         engine = get_analysis_engine()
-        candidate = engine.analyse(transcript)
+        try:
+            candidate = engine.analyse(transcript)
+        except Exception:
+            # A remote-analysis outage must not stall a resumable batch or discard
+            # completed transcription. Persist conservative evidence-only rules and
+            # allow a later targeted reanalysis when the provider recovers.
+            engine = RuleAnalysisEngine()
+            candidate = engine.analyse(transcript)
         candidate = validate_candidate_evidence(candidate, {segment.id: segment for segment in transcript}, engine)
         persist_analysis(db, call, candidate, settings.openai_model if engine.__class__.__name__ == "OpenAIAnalysisEngine" else "rules")
         call.processing_status = "ANALYZED"
