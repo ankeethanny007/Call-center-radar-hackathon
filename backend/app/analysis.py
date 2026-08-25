@@ -282,7 +282,11 @@ class OpenAIAnalysisEngine:
         if not settings.openai_api_key:
             raise RuntimeError("OPENAI_API_KEY is required when ANALYSIS_PROVIDER=openai")
         from openai import OpenAI
-        self.client = OpenAI(api_key=settings.openai_api_key)
+        self.client = OpenAI(
+            api_key=settings.openai_api_key,
+            timeout=settings.openai_timeout_seconds,
+            max_retries=1,
+        )
 
     def analyse(self, segments: list[TranscriptSegment], repeat_call_count: int = 0, duration_seconds: float | None = None) -> AnalysisCandidate:
         transcript = "\n".join(
