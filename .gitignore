@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 *.pyc
@@ -6,3 +8,6 @@ node_modules/
 .next/
 data/
 data/callradar-data.zip
+work/
+*.db
+*.ses
