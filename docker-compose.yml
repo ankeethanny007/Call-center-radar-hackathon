@@ -2,24 +2,101 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: callradar
-      POSTGRES_USER: callradar
-      POSTGRES_PASSWORD: callradar
-    ports: ["5432:5432"]
-    volumes: [postgres_data:/var/lib/postgresql/data]
+      POSTGRES_DB: ${POSTGRES_DB:-callradar}
+      POSTGRES_USER: ${POSTGRES_USER:-callradar}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-callradar}
+    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
   api:
     build: ./backend
     environment:
-      DATABASE_URL: postgresql+psycopg://callradar:callradar@db:5432/callradar
+      # Keep the native-development DATABASE_URL independent from Compose. A
+      # managed database can override COMPOSE_DATABASE_URL as one secret.
+      DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-callradar}:${POSTGRES_PASSWORD:-callradar}@db:5432/${POSTGRES_DB:-callradar}}
       MEDIA_ROOT: /data
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      API_ACCESS_TOKEN: ${API_ACCESS_TOKEN:-}
+      MEDIA_URL_TTL_SECONDS: ${MEDIA_URL_TTL_SECONDS:-900}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      ANALYSIS_PROVIDER: ${ANALYSIS_PROVIDER:-openai}
+      VALIDATE_EVIDENCE_WITH_LLM: ${VALIDATE_EVIDENCE_WITH_LLM:-true}
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      WHISPER_DOWNLOAD_ROOT: /app/work/models
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-local}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:-}
+      SUPABASE_BUCKET: ${SUPABASE_BUCKET:-call-audio}
     ports: ["8000:8000"]
-    volumes: [./data:/data]
-    depends_on: [db]
-  web:
-    build: ./frontend
+    volumes:
+      # The pipeline stores temporary channel splits in /data/.work.
+      - ${MEDIA_ROOT_HOST:-./data}:/data
+      - ${WORK_ROOT_HOST:-./work}:/app/work
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+  worker:
+    build: ./backend
+    profiles: ["worker"]
+    command: ["sh", "-c", "alembic -c alembic.ini upgrade head && python -m app.cli process --media-root /data"]
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-callradar}:${POSTGRES_PASSWORD:-callradar}@db:5432/${POSTGRES_DB:-callradar}}
+      MEDIA_ROOT: /data
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      ANALYSIS_PROVIDER: ${ANALYSIS_PROVIDER:-openai}
+      VALIDATE_EVIDENCE_WITH_LLM: ${VALIDATE_EVIDENCE_WITH_LLM:-true}
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      WHISPER_DOWNLOAD_ROOT: /app/work/models
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-local}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:-}
+      SUPABASE_BUCKET: ${SUPABASE_BUCKET:-call-audio}
+    volumes:
+      - ${MEDIA_ROOT_HOST:-./data}:/data
+      - ${WORK_ROOT_HOST:-./work}:/app/work
+    depends_on:
+      db:
+        condition: service_healthy
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    environment:
+      # API_INTERNAL_URL is for Next.js server rendering; NEXT_PUBLIC_API_URL
+      # is deliberately browser-visible and must be a public API origin.
+      API_INTERNAL_URL: ${API_INTERNAL_URL:-http://api:8000}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      # Server-only token for Next.js SSR. Do not use a NEXT_PUBLIC_ variable.
+      API_ACCESS_TOKEN: ${API_ACCESS_TOKEN:-}
     ports: ["3000:3000"]
-    depends_on: [api]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000').then((r) => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
 volumes:
   postgres_data:

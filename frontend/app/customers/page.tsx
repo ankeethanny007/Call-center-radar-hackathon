@@ -1,2 +1,8 @@
-const API=process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-export default async function Customers(){const items=await fetch(`${API}/customers`,{cache:"no-store"}).then(r=>r.json()).catch(()=>[]);return <><h1>Customers</h1><section>{items.length ? items.map((c:any)=><div className="card" key={c.id}><strong>{c.display_name||c.id}</strong><span>{c.call_count} calls</span></div>) : <div className="empty">No customers imported.</div>}</section></>}
+import { CustomerDirectory } from "../../components/customer-directory";
+import { PageHeader } from "../../components/ui";
+import { api } from "../../lib/api";
+
+export default async function CustomersPage() {
+  const customers = await api.customers();
+  return <><PageHeader eyebrow="Customer intelligence" title="Customers" description="Bring repeat contact, unresolved issues, and individual call history into one evidence-backed view." /><CustomerDirectory customers={customers} /></>;
+}
