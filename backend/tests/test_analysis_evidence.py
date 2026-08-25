@@ -76,6 +76,7 @@ def test_grateful_final_customer_turn_is_evidenced_as_satisfied() -> None:
         segment(2, "customer", "Thank you. Bye.", 8_000),
     ]
     candidate = RuleAnalysisEngine().analyse(segments)
+    candidate.resolution_status = "RESOLVED"
 
     validated = validate_candidate_evidence(candidate, {item.id: item for item in segments}, RuleAnalysisEngine())
 
@@ -83,6 +84,39 @@ def test_grateful_final_customer_turn_is_evidenced_as_satisfied() -> None:
     assert final_mood.segment_id == 2
     assert final_mood.mood == "satisfied"
     assert final_mood.quote == "Thank you. Bye."
+
+
+def test_explicit_no_more_help_before_farewell_is_satisfied() -> None:
+    segments = [
+        segment(1, "customer", "Well, no, that's all for today.", 30_000),
+        segment(2, "customer", "You too.", 40_000),
+        segment(3, "customer", "Bye-bye.", 45_000),
+    ]
+    candidate = RuleAnalysisEngine().analyse(segments)
+    candidate.resolution_status = "RESOLVED"
+
+    validated = validate_candidate_evidence(candidate, {item.id: item for item in segments}, RuleAnalysisEngine())
+
+    final_mood = sorted(validated.mood_events, key=lambda item: item.segment_id)[-1]
+    assert final_mood.segment_id == 1
+    assert final_mood.mood == "satisfied"
+    assert final_mood.quote == "Well, no, that's all for today."
+
+
+def test_polite_close_does_not_mask_transaction_amount_mismatch() -> None:
+    segments = [
+        segment(1, "customer", "Transfer $86 from checking to savings.", 10_000),
+        segment(2, "agent", "$26 has been transferred from checking to savings.", 20_000),
+        segment(3, "customer", "No, that'll be it. Thank you.", 30_000),
+    ]
+
+    candidate = RuleAnalysisEngine().analyse(segments)
+    validated = validate_candidate_evidence(candidate, {item.id: item for item in segments}, RuleAnalysisEngine())
+
+    signals = {item.signal: item.points for item in validated.attention_contributions}
+    assert signals["transaction_amount_requested"] == 35
+    assert signals["transaction_amount_mismatch"] == 50
+    assert not any(item.mood == "satisfied" for item in validated.mood_events)
 
 
 def test_appointment_request_maps_to_general_inquiry() -> None:

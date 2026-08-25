@@ -43,6 +43,8 @@ ATTENTION_WEIGHTS = {
     "agent_unable_to_answer": 15,
     "serious_complaint": 20,
     "abnormal_handle_time": 10,
+    "transaction_amount_requested": 35,
+    "transaction_amount_mismatch": 50,
 }
 
 
@@ -69,7 +71,7 @@ class MoodCandidate(StrictModel):
 
 class ScoreCandidate(StrictModel):
     signal: str
-    points: int = Field(ge=0, le=25)
+    points: int = Field(ge=0, le=100)
     explanation: str
     evidence: EvidencePointer | None = None
 
@@ -153,6 +155,11 @@ def pointer(segment: TranscriptSegment | None) -> EvidencePointer | None:
     return EvidencePointer(segment_id=segment.id, quote=segment.text) if segment else None
 
 
+def stated_amount(segment: TranscriptSegment) -> int | None:
+    match = re.search(r"\$\s*(\d+(?:\.\d{1,2})?)", segment.text)
+    return round(float(match.group(1)) * 100) if match else None
+
+
 class RuleAnalysisEngine:
     """Conservative fallback. It omits a claim rather than making an unsupported guess."""
 
@@ -186,7 +193,7 @@ class RuleAnalysisEngine:
                 break
 
         unresolved = first_match(customers, ("not resolved", "nothing you can do", "still doesn't work", "still does not work", "still not", "again"))
-        resolved = first_match(customers, ("that resolves", "that solved", "all sorted", "thank you", "thanks"))
+        resolved = first_match(customers, ("that resolves", "that solved", "all sorted", "all set"))
         if unresolved:
             candidate.resolution_status, candidate.resolution_evidence = "UNRESOLVED", pointer(unresolved)
         elif resolved:
@@ -199,13 +206,43 @@ class RuleAnalysisEngine:
         negative = first_match(customers, ("angry", "frustrated", "unacceptable", "terrible", "complaint", "ridiculous"))
         persistent_negative = first_match(customers, ("still frustrated", "still angry", "still upset", "still unacceptable", "still disappointed"))
         concerned = first_match(customers, ("worried", "concerned", "don't recognize", "do not recognize", "confused"))
-        positive = first_match(customers, ("thank", "thanks", "helpful", "great"))
+        positive = first_match(customers, ("very helpful", "that was helpful", "great service", "excellent", "perfect"))
         if concerned:
             candidate.mood_events.append(MoodCandidate(segment_id=concerned.id, mood="concerned", score=35, quote=concerned.text))
         if negative:
             candidate.mood_events.append(MoodCandidate(segment_id=negative.id, mood="frustrated", score=20, quote=negative.text))
         if positive:
             candidate.mood_events.append(MoodCandidate(segment_id=positive.id, mood="satisfied", score=80, quote=positive.text))
+
+        requested_amount = next(((item, stated_amount(item)) for item in customers if stated_amount(item) is not None), None)
+        confirmed_amount = next(
+            (
+                (item, stated_amount(item))
+                for item in agents
+                if stated_amount(item) is not None
+                and any(term in normalize(item.text) for term in ("transferred", "transfer", "send your payment", "paid"))
+            ),
+            None,
+        )
+        if requested_amount and confirmed_amount and requested_amount[1] != confirmed_amount[1]:
+            request_segment, request_cents = requested_amount
+            confirmation_segment, confirmation_cents = confirmed_amount
+            candidate.attention_contributions.extend(
+                (
+                    ScoreCandidate(
+                        signal="transaction_amount_requested",
+                        points=ATTENTION_WEIGHTS["transaction_amount_requested"],
+                        explanation=f"Customer requested a transaction amount of ${request_cents / 100:g}.",
+                        evidence=pointer(request_segment),
+                    ),
+                    ScoreCandidate(
+                        signal="transaction_amount_mismatch",
+                        points=ATTENTION_WEIGHTS["transaction_amount_mismatch"],
+                        explanation=f"Agent confirmed a different transaction amount of ${confirmation_cents / 100:g}.",
+                        evidence=pointer(confirmation_segment),
+                    ),
+                )
+            )
 
         escalation = first_match(customers, ("manager", "supervisor", "escalate", "complaint"))
         repeat_question = first_match(customers, ("already told", "already explained", "repeat myself", "third time"))
@@ -289,14 +326,43 @@ def validate_candidate_evidence(
     """Reject unsupported claims before persistence; no valid citation means no returned claim."""
     customer_segments = sorted((segment for segment in segments.values() if segment.speaker == "customer"), key=lambda item: item.start_ms)
     if customer_segments:
-        final_customer = customer_segments[-1]
-        closing = normalize(final_customer.text)
-        # A clearly grateful closing is direct evidence for the customer's
-        # terminal mood. It does not imply that the underlying issue resolved.
-        if any(term in closing for term in ("thank you", "thanks", "all set", "that'll be all", "that will be all")):
-            candidate.mood_events = [event for event in candidate.mood_events if event.segment_id != final_customer.id]
+        # Search the final customer turns because channel-level word timestamps can
+        # put a short farewell after the substantive closing statement. A grateful
+        # close or an explicit statement that no more help is needed is direct
+        # evidence for terminal satisfaction. It does not imply issue resolution.
+        explicit_praise = next(
+            (segment for segment in reversed(customer_segments[-3:]) if any(term in normalize(segment.text) for term in ("very helpful", "great service", "excellent", "perfect"))),
+            None,
+        )
+        closing_customer = explicit_praise or next(
+            (
+                segment
+                for segment in reversed(customer_segments[-3:])
+                if any(
+                    term in normalize(segment.text)
+                    for term in (
+                        "thank you",
+                        "thanks",
+                        "all set",
+                        "that's all",
+                        "that is all",
+                        "that'll be all",
+                        "that will be all",
+                    )
+                )
+            ),
+            None,
+        )
+        integrity_risk = any(item.signal in {"transaction_amount_requested", "transaction_amount_mismatch"} for item in candidate.attention_contributions)
+        if closing_customer and (explicit_praise or (candidate.resolution_status == "RESOLVED" and not integrity_risk)):
+            candidate.mood_events = [event for event in candidate.mood_events if event.segment_id != closing_customer.id]
             candidate.mood_events.append(
-                MoodCandidate(segment_id=final_customer.id, mood="satisfied", score=MOOD_SCORES["satisfied"], quote=final_customer.text)
+                MoodCandidate(
+                    segment_id=closing_customer.id,
+                    mood="satisfied",
+                    score=MOOD_SCORES["satisfied"],
+                    quote=closing_customer.text,
+                )
             )
     entries: list[tuple[str, str, EvidencePointer]] = []
     if candidate.intent_category and candidate.intent_description and candidate.intent_evidence:
