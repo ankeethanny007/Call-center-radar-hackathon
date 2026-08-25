@@ -1,27 +1,379 @@
-"""Evidence-first deterministic analysis. A finding is emitted only with a source turn."""
-from .models import Turn
+"""Structured, evidence-first conversation intelligence.
 
-def evidence(turn: Turn) -> dict:
-    return {"turn_id": turn.id, "start_ms": turn.start_ms, "end_ms": turn.end_ms, "quote": turn.text}
+The analysis engine may suggest claims, but only claims with valid transcript citations
+are persisted. Rules provide an offline fallback for local development and tests.
+"""
+from __future__ import annotations
 
-def first_matching(turns, words):
-    return next((t for t in turns if any(w in t.text.lower() for w in words)), None)
+import json
+import re
+from typing import Iterable
 
-def analyse(turns: list[Turn]) -> dict:
-    customer = [t for t in turns if t.speaker == "customer"]
-    all_text = " ".join(t.text for t in customer).lower()
-    intent_terms = {"card": ["card", "declined"], "payment": ["payment", "transfer"], "fraud": ["fraud", "scam", "unauthorised"], "balance": ["balance", "statement"]}
-    intent = next(((name, first_matching(customer, words)) for name, words in intent_terms.items() if first_matching(customer, words)), None)
-    negative = first_matching(customer, ["angry", "frustrated", "unacceptable", "complaint", "terrible", "cancel"])
-    positive = first_matching(customer, ["thank", "thanks", "great", "helpful"])
-    unresolved = first_matching(customer, ["not resolved", "still", "doesn't work", "does not work", "again"])
-    score = min(100, (50 if negative else 0) + (35 if unresolved else 0) + (15 if "fraud" in all_text else 0))
-    summary_source = customer[0] if customer else None
-    return {
-      "intent": {"label": intent[0], "evidence": evidence(intent[1])} if intent else None,
-      "mood": {"label": "negative", "evidence": evidence(negative), "shift": {"to": "positive", "evidence": evidence(positive)}} if negative else ({"label": "positive", "evidence": evidence(positive)} if positive else None),
-      "resolution": {"label": "unresolved", "evidence": evidence(unresolved)} if unresolved else None,
-      "summary": {"text": summary_source.text[:240], "evidence": evidence(summary_source)} if summary_source else None,
-      "attention_score": score,
-      "attention_evidence": [evidence(t) for t in (negative, unresolved) if t],
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .config import settings
+from .models import TranscriptSegment
+
+ISSUE_TAXONOMY = (
+    "billing", "fraud", "card", "account", "login", "payment", "refund",
+    "cash_withdrawal", "transfer", "fees", "complaint", "general_inquiry", "other",
+)
+MOODS = ("positive", "neutral", "confused", "concerned", "frustrated", "angry", "distressed", "satisfied")
+# Mood labels are the evidenced judgments.  Their displayed numeric values are
+# a fixed presentation scale, never an unverified model-generated sentiment
+# score. This makes the timeline deterministic across re-analysis runs.
+MOOD_SCORES = {
+    "positive": 80,
+    "neutral": 50,
+    "confused": 40,
+    "concerned": 35,
+    "frustrated": 20,
+    "angry": 10,
+    "distressed": 5,
+    "satisfied": 90,
+}
+RESOLUTIONS = ("RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "UNKNOWN")
+ATTENTION_WEIGHTS = {
+    "highly_negative_customer": 25,
+    "issue_unresolved": 25,
+    "escalation_requested": 15,
+    "persistent_negative_mood": 15,
+    "repeated_question": 10,
+    "repeat_caller": 10,
+    "agent_unable_to_answer": 15,
+    "serious_complaint": 20,
+    "abnormal_handle_time": 10,
+}
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class EvidencePointer(StrictModel):
+    segment_id: int
+    quote: str = Field(min_length=1)
+
+
+class MoodCandidate(StrictModel):
+    segment_id: int
+    mood: str
+    score: int = Field(ge=0, le=100)
+    quote: str
+
+    @field_validator("mood")
+    @classmethod
+    def mood_is_allowed(cls, value: str) -> str:
+        return value if value in MOODS else "neutral"
+
+
+class ScoreCandidate(StrictModel):
+    signal: str
+    points: int = Field(ge=0, le=25)
+    explanation: str
+    evidence: EvidencePointer | None = None
+
+
+class AnalysisCandidate(StrictModel):
+    intent_category: str | None = None
+    intent_description: str | None = None
+    intent_confidence: float = Field(default=0, ge=0, le=1)
+    intent_evidence: EvidencePointer | None = None
+    resolution_status: str = "UNKNOWN"
+    resolution_evidence: EvidencePointer | None = None
+    summary: str | None = None
+    summary_evidence: EvidencePointer | None = None
+    mood_events: list[MoodCandidate] = Field(default_factory=list)
+    attention_contributions: list[ScoreCandidate] = Field(default_factory=list)
+    topics: list[str] = Field(default_factory=list)
+
+    @field_validator("intent_category")
+    @classmethod
+    def taxonomy_is_controlled(cls, value: str | None) -> str | None:
+        return value if value in ISSUE_TAXONOMY else None
+
+    @field_validator("resolution_status")
+    @classmethod
+    def resolution_is_allowed(cls, value: str) -> str:
+        return value if value in RESOLUTIONS else "UNKNOWN"
+
+    @field_validator("summary")
+    @classmethod
+    def summary_is_short(cls, value: str | None) -> str | None:
+        return " ".join(value.split()[:40]) if value else value
+
+
+class EvidenceValidationItem(StrictModel):
+    claim_key: str
+    supported: bool
+
+
+class EvidenceValidationResult(StrictModel):
+    items: list[EvidenceValidationItem]
+
+
+def normalize(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def openai_strict_schema(schema: object) -> object:
+    """Adapt Pydantic JSON Schema to OpenAI Structured Outputs strict requirements."""
+    if isinstance(schema, list):
+        return [openai_strict_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    result = {key: openai_strict_schema(value) for key, value in schema.items()}
+    properties = result.get("properties")
+    if isinstance(properties, dict):
+        result["additionalProperties"] = False
+        result["required"] = list(properties.keys())
+    return result
+
+
+def pointer_is_valid(pointer: EvidencePointer | None, segments: dict[int, TranscriptSegment]) -> tuple[bool, str]:
+    if pointer is None:
+        return False, "Missing evidence pointer"
+    segment = segments.get(pointer.segment_id)
+    if segment is None:
+        return False, "Referenced transcript segment does not exist"
+    if normalize(pointer.quote) not in normalize(segment.text):
+        return False, "Quoted evidence is not present in the referenced transcript segment"
+    return True, "Validated transcript citation"
+
+
+def word_limited(text: str, max_words: int = 40) -> str:
+    return " ".join(text.split()[:max_words])
+
+
+def first_match(segments: Iterable[TranscriptSegment], terms: tuple[str, ...]) -> TranscriptSegment | None:
+    return next((segment for segment in segments if any(term in normalize(segment.text) for term in terms)), None)
+
+
+def pointer(segment: TranscriptSegment | None) -> EvidencePointer | None:
+    return EvidencePointer(segment_id=segment.id, quote=segment.text) if segment else None
+
+
+class RuleAnalysisEngine:
+    """Conservative fallback. It omits a claim rather than making an unsupported guess."""
+
+    taxonomy_terms = {
+        "fraud": ("fraud", "scam", "unrecognized", "unfamiliar", "unauthorised", "unauthorized"),
+        "card": ("card", "declined", "pin"),
+        "billing": ("bill", "billing", "charged", "charge"),
+        "payment": ("payment", "pay ", "paid"),
+        "refund": ("refund", "refunded"),
+        "cash_withdrawal": ("cash withdrawal", "atm", "cash machine"),
+        "transfer": ("transfer", "beneficiary", "wire"),
+        "fees": ("fee", "fees", "charge"),
+        "login": ("login", "log in", "password", "sign in"),
+        "account": ("account", "balance", "statement"),
+        "complaint": ("complaint", "complain", "unacceptable"),
+        "general_inquiry": ("schedule an appointment", "appointment", "opening hours", "branch hours"),
     }
+
+    def analyse(self, segments: list[TranscriptSegment], repeat_call_count: int = 0, duration_seconds: float | None = None) -> AnalysisCandidate:
+        customers = [item for item in segments if item.speaker == "customer"]
+        agents = [item for item in segments if item.speaker == "agent"]
+        candidate = AnalysisCandidate()
+        for category, terms in self.taxonomy_terms.items():
+            found = first_match(customers, terms)
+            if found:
+                candidate.intent_category = category
+                candidate.intent_description = word_limited(found.text)
+                candidate.intent_confidence = 0.65
+                candidate.intent_evidence = pointer(found)
+                candidate.topics = [category]
+                break
+
+        unresolved = first_match(customers, ("not resolved", "nothing you can do", "still doesn't work", "still does not work", "still not", "again"))
+        resolved = first_match(customers, ("that resolves", "that solved", "all sorted", "thank you", "thanks"))
+        if unresolved:
+            candidate.resolution_status, candidate.resolution_evidence = "UNRESOLVED", pointer(unresolved)
+        elif resolved:
+            candidate.resolution_status, candidate.resolution_evidence = "RESOLVED", pointer(resolved)
+
+        source = customers[0] if customers else (agents[0] if agents else None)
+        if source:
+            candidate.summary, candidate.summary_evidence = word_limited(source.text), pointer(source)
+
+        negative = first_match(customers, ("angry", "frustrated", "unacceptable", "terrible", "complaint", "ridiculous"))
+        persistent_negative = first_match(customers, ("still frustrated", "still angry", "still upset", "still unacceptable", "still disappointed"))
+        concerned = first_match(customers, ("worried", "concerned", "don't recognize", "do not recognize", "confused"))
+        positive = first_match(customers, ("thank", "thanks", "helpful", "great"))
+        if concerned:
+            candidate.mood_events.append(MoodCandidate(segment_id=concerned.id, mood="concerned", score=35, quote=concerned.text))
+        if negative:
+            candidate.mood_events.append(MoodCandidate(segment_id=negative.id, mood="frustrated", score=20, quote=negative.text))
+        if positive:
+            candidate.mood_events.append(MoodCandidate(segment_id=positive.id, mood="satisfied", score=80, quote=positive.text))
+
+        escalation = first_match(customers, ("manager", "supervisor", "escalate", "complaint"))
+        repeat_question = first_match(customers, ("already told", "already explained", "repeat myself", "third time"))
+        # A source name by itself is not sufficient evidence for a manager-facing score.
+        # This signal is emitted only when the caller explicitly states that this is a
+        # repeat contact, so it remains directly seekable in the current recording.
+        repeat_caller = first_match(customers, ("called before", "called previously", "called already", "second time calling", "third time calling", "fourth time calling"))
+        # Do not infer this from the measured recording duration. It is only included
+        # when a caller's own words substantively report an abnormal wait/handling time.
+        abnormal_handle_time = first_match(customers, ("been on hold", "waiting for an hour", "waiting 30 minutes", "waiting thirty minutes", "long wait", "waiting so long"))
+        unable = first_match(agents, ("can't", "cannot", "unable", "don't know", "do not know"))
+        if negative:
+            candidate.attention_contributions.append(ScoreCandidate(signal="highly_negative_customer", points=25, explanation="Customer expressed strong negative sentiment.", evidence=pointer(negative)))
+        if unresolved:
+            candidate.attention_contributions.append(ScoreCandidate(signal="issue_unresolved", points=25, explanation="Customer explicitly indicated the issue remained unresolved.", evidence=pointer(unresolved)))
+        if escalation:
+            candidate.attention_contributions.append(ScoreCandidate(signal="escalation_requested", points=15, explanation="Customer requested escalation or a manager.", evidence=pointer(escalation)))
+        if repeat_question:
+            candidate.attention_contributions.append(ScoreCandidate(signal="repeated_question", points=10, explanation="Customer indicated they had to repeat information.", evidence=pointer(repeat_question)))
+        if repeat_caller:
+            candidate.attention_contributions.append(ScoreCandidate(signal="repeat_caller", points=10, explanation="Customer explicitly said this was a repeat contact.", evidence=pointer(repeat_caller)))
+        if unable:
+            candidate.attention_contributions.append(ScoreCandidate(signal="agent_unable_to_answer", points=15, explanation="Agent indicated they could not provide an answer.", evidence=pointer(unable)))
+        if negative and escalation:
+            candidate.attention_contributions.append(ScoreCandidate(signal="serious_complaint", points=20, explanation="Customer made a serious complaint or escalation request.", evidence=pointer(escalation)))
+        if persistent_negative:
+            candidate.attention_contributions.append(ScoreCandidate(signal="persistent_negative_mood", points=15, explanation="Customer explicitly described persistent negative sentiment.", evidence=pointer(persistent_negative)))
+        if abnormal_handle_time:
+            candidate.attention_contributions.append(ScoreCandidate(signal="abnormal_handle_time", points=10, explanation="Customer explicitly reported a prolonged wait or handling time.", evidence=pointer(abnormal_handle_time)))
+        return candidate
+
+
+class OpenAIAnalysisEngine:
+    """Uses Responses API structured output, then validates every citation locally."""
+
+    def __init__(self) -> None:
+        if not settings.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is required when ANALYSIS_PROVIDER=openai")
+        from openai import OpenAI
+        self.client = OpenAI(api_key=settings.openai_api_key)
+
+    def analyse(self, segments: list[TranscriptSegment], repeat_call_count: int = 0, duration_seconds: float | None = None) -> AnalysisCandidate:
+        transcript = "\n".join(
+            f"[{segment.id}] {segment.start_ms}ms {segment.speaker.upper()}: {segment.text}" for segment in segments
+        )
+        instructions = """You are an evidence-first call-centre analyst. Analyze only the transcript supplied.
+Every non-null field must cite an existing transcript segment and an exact quote from that segment.
+Use only this issue taxonomy: billing, fraud, card, account, login, payment, refund, cash_withdrawal, transfer, fees, complaint, general_inquiry, other.
+Use only RESOLVED, PARTIALLY_RESOLVED, UNRESOLVED, UNKNOWN for resolution.
+Use only positive, neutral, confused, concerned, frustrated, angry, distressed, satisfied for moods.
+Do not infer missing facts. Keep summary to 40 words maximum. Use only these attention signal names with their fixed weights: highly_negative_customer (25), issue_unresolved (25), escalation_requested (15), persistent_negative_mood (15), repeated_question (10), repeat_caller (10), agent_unable_to_answer (15), serious_complaint (20), abnormal_handle_time (10). A repeat_caller signal requires the customer to explicitly say this is a repeat contact. An abnormal_handle_time signal requires the customer to explicitly report a prolonged wait or handling time; never infer either signal from metadata. Every contribution needs a directly supporting citation."""
+        payload = f"TRANSCRIPT:\n{transcript}"
+        response = self.client.responses.create(
+            model=settings.openai_model,
+            instructions=instructions,
+            input=payload,
+            text={"format": {"type": "json_schema", "name": "call_analysis", "strict": True, "schema": openai_strict_schema(AnalysisCandidate.model_json_schema())}},
+            store=False,
+        )
+        return AnalysisCandidate.model_validate(json.loads(response.output_text))
+
+    def validate_evidence(self, claims: list[dict[str, str]]) -> dict[str, bool]:
+        """A separate semantic gate: citations must substantively support each claim."""
+        if not claims:
+            return {}
+        response = self.client.responses.create(
+            model=settings.openai_model,
+            instructions="""You are an evidence validator. For each claim, decide whether the quoted transcript text directly supports it.
+Do not accept claims based only on a related topic or similar wording. For a summary, a concise faithful paraphrase of the cited quote is supported. Return one decision per claim key.""",
+            input=json.dumps(claims),
+            text={"format": {"type": "json_schema", "name": "evidence_validation", "strict": True, "schema": openai_strict_schema(EvidenceValidationResult.model_json_schema())}},
+            store=False,
+        )
+        result = EvidenceValidationResult.model_validate(json.loads(response.output_text))
+        return {item.claim_key: item.supported for item in result.items}
+
+
+def validate_candidate_evidence(
+    candidate: AnalysisCandidate, segments: dict[int, TranscriptSegment], engine: RuleAnalysisEngine | OpenAIAnalysisEngine
+) -> AnalysisCandidate:
+    """Reject unsupported claims before persistence; no valid citation means no returned claim."""
+    customer_segments = sorted((segment for segment in segments.values() if segment.speaker == "customer"), key=lambda item: item.start_ms)
+    if customer_segments:
+        final_customer = customer_segments[-1]
+        closing = normalize(final_customer.text)
+        # A clearly grateful closing is direct evidence for the customer's
+        # terminal mood. It does not imply that the underlying issue resolved.
+        if any(term in closing for term in ("thank you", "thanks", "all set", "that'll be all", "that will be all")):
+            candidate.mood_events = [event for event in candidate.mood_events if event.segment_id != final_customer.id]
+            candidate.mood_events.append(
+                MoodCandidate(segment_id=final_customer.id, mood="satisfied", score=MOOD_SCORES["satisfied"], quote=final_customer.text)
+            )
+    entries: list[tuple[str, str, EvidencePointer]] = []
+    if candidate.intent_category and candidate.intent_description and candidate.intent_evidence:
+        # The controlled category is a manager-facing judgment too. Validate it with
+        # the detail rather than merely checking that the free-text description fits.
+        entries.append(("intent", f"{candidate.intent_category}: {candidate.intent_description}", candidate.intent_evidence))
+    if candidate.resolution_status != "UNKNOWN" and candidate.resolution_evidence:
+        entries.append(("resolution", candidate.resolution_status, candidate.resolution_evidence))
+    if candidate.summary and candidate.summary_evidence:
+        entries.append(("summary", candidate.summary, candidate.summary_evidence))
+    for index, mood in enumerate(candidate.mood_events):
+        entries.append((f"mood:{index}", mood.mood, EvidencePointer(segment_id=mood.segment_id, quote=mood.quote)))
+    for index, contribution in enumerate(candidate.attention_contributions):
+        if contribution.evidence:
+            # The fixed score signal—not just its prose explanation—must be supported
+            # by the cited words before it can influence a manager-facing score.
+            entries.append((f"attention:{index}", f"{contribution.signal}: {contribution.explanation}", contribution.evidence))
+
+    allowed: dict[str, bool] = {}
+    claims_for_model: list[dict[str, str]] = []
+    for key, claim, citation in entries:
+        local_valid, _note = pointer_is_valid(citation, segments)
+        allowed[key] = local_valid
+        if local_valid and isinstance(engine, OpenAIAnalysisEngine) and settings.validate_evidence_with_llm:
+            segment = segments[citation.segment_id]
+            claims_for_model.append({"claim_key": key, "claim": claim, "speaker": segment.speaker, "quote": citation.quote})
+    if claims_for_model:
+        try:
+            semantic = engine.validate_evidence(claims_for_model)
+            for key in [item["claim_key"] for item in claims_for_model]:
+                allowed[key] = allowed[key] and semantic.get(key, False)
+        except Exception:
+            # Fail closed: evidence that cannot be validated by the configured validator is omitted.
+            for item in claims_for_model:
+                allowed[item["claim_key"]] = False
+
+    if not allowed.get("intent", False):
+        candidate.intent_category = candidate.intent_description = None
+        candidate.intent_confidence = 0
+        candidate.intent_evidence = None
+        candidate.topics = []
+    if candidate.resolution_status != "UNKNOWN" and not allowed.get("resolution", False):
+        candidate.resolution_status, candidate.resolution_evidence = "UNKNOWN", None
+    if candidate.summary and not allowed.get("summary", False):
+        # Preserve the required <=40-word summary using a directly cited source excerpt
+        # rather than retaining a potentially unsupported generated paraphrase.
+        source = segments.get(candidate.summary_evidence.segment_id) if candidate.summary_evidence else next(iter(segments.values()), None)
+        candidate.summary = word_limited(source.text) if source else None
+        candidate.summary_evidence = pointer(source) if source else None
+    candidate.mood_events = [event for index, event in enumerate(candidate.mood_events) if allowed.get(f"mood:{index}", False)]
+    for event in candidate.mood_events:
+        event.score = MOOD_SCORES[event.mood]
+    selected_signals: set[str] = set()
+    safe_contributions: list[ScoreCandidate] = []
+    for index, item in enumerate(candidate.attention_contributions):
+        if not allowed.get(f"attention:{index}", False) or item.signal not in ATTENTION_WEIGHTS or item.signal in selected_signals:
+            continue
+        item.points = ATTENTION_WEIGHTS[item.signal]
+        selected_signals.add(item.signal)
+        safe_contributions.append(item)
+    candidate.attention_contributions = safe_contributions
+    return candidate
+
+
+def get_analysis_engine() -> RuleAnalysisEngine | OpenAIAnalysisEngine:
+    if settings.analysis_provider.lower() == "rules":
+        return RuleAnalysisEngine()
+    try:
+        return OpenAIAnalysisEngine()
+    except Exception:
+        # An API configuration outage must not discard a successfully transcribed call.
+        return RuleAnalysisEngine()
+
+
+def attention_band(score: int) -> str:
+    if score >= 85: return "IMMEDIATE_ATTENTION"
+    if score >= 70: return "CRITICAL"
+    if score >= 50: return "HIGH"
+    if score >= 30: return "MODERATE"
+    return "LOW"
