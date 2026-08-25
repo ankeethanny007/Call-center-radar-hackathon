@@ -1,4 +1,10 @@
-const API=process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-const ms=(n:number)=>new Date(n).toISOString().slice(14,19);
-function Finding({title,value}:any){if(!value)return null;return <article><h3>{title}</h3><p>{value.label||value.text}</p>{value.evidence&&<blockquote><small>{ms(value.evidence.start_ms)}</small> “{value.evidence.quote}”</blockquote>}</article>}
-export default async function Detail({params}:{params:Promise<{id:string}>}){const {id}=await params;const c=await fetch(`${API}/calls/${id}`,{cache:"no-store"}).then(r=>r.json());const a=c.analysis;return <><a href="/">← queue</a><h1>Call {c.id}</h1><p>{c.status} · Customer: {c.customer_id||"unknown"}</p><audio controls src={`${API}${c.audio_url}`} /><div className="grid"><section><h2>Analysis {a&&`· ${a.attention_score}/100`}</h2>{a?<><Finding title="Intent" value={a.intent}/><Finding title="Customer mood" value={a.mood}/><Finding title="Resolution" value={a.resolution}/><Finding title="Summary" value={a.summary}/></>:<p>Analysis pending.</p>}</section><section><h2>Transcript</h2>{c.turns.map((t:any)=><p className={`turn ${t.speaker}`} key={t.id}><small>{ms(t.start_ms)} · {t.speaker}</small>{t.text}</p>)}</section></div></>}
+import { notFound } from "next/navigation";
+import { api } from "../../../lib/api";
+import { CallWorkspace } from "../../../components/call-workspace";
+
+export default async function CallDetailPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const call = await api.call(id);
+  if (!call) notFound();
+  return <CallWorkspace call={call} />;
+}

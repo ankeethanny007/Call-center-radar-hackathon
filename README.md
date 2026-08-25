@@ -1,63 +1,191 @@
 # Call-Centre Radar
 
-Persistent, evidence-first analysis for stereo consumer-bank support recordings. It deliberately does **not** infer speakers: stereo channel 0/left is always the agent and channel 1/right is always the customer.
+Call-Centre Radar is an evidence-first conversation-intelligence product for consumer-bank support calls. It ingests stereo recordings offline, persists speaker-attributed transcripts and validated analysis, and serves a fast manager dashboard. It never transcribes or analyzes a call during an API request.
 
-## Current data status
-
-The supplied `callradar-data.zip` is stored locally at `data/callradar-data.zip` and excluded from Git. It contains 1,441 MP3 recordings and 1,441 matching JSON metadata files. The next implementation step is extracting the archive and mapping its verified metadata schema into the manifest.
-
-## Five-day delivery plan
-
-1. **Day 1:** confirm the source files and map their metadata into the manifest below; validate a small sample.
-2. **Day 2:** process a representative batch; review timestamps, channel mapping, and evidence quality.
-3. **Day 3:** run resumable batch processing across all 1,441 calls; investigate failures.
-4. **Day 4:** validate dashboard metrics against sampled calls and deploy staging.
-5. **Day 5:** complete all-call processing, QA, demo rehearsal, and production hand-off.
-
-## Run locally
-
-Install Docker, then start the services:
-
-```bash
-docker compose up --build
-```
-
-The dashboard is at `http://localhost:3000`; the API is at `http://localhost:8000/docs`. PostgreSQL persists through the `postgres_data` Docker volume. For Supabase, set `DATABASE_URL` on the API service to its PostgreSQL connection string.
-
-## Data contract
-
-Put recordings below `data/` and make a neutral adapter manifest—this is the only adapter needed once the actual metadata format is known:
-
-```json
-[
-  {
-    "call_id": "unique-call-id",
-    "audio_path": "recordings/example.mp3",
-    "customer_id": "stable-customer-id",
-    "customer_name": "Optional display name",
-    "metadata": {"source_fields": "preserve original metadata here"}
-  }
-]
-```
-
-`audio_path` is relative to `data/`. Do not add files to the database by hand; import the manifest:
-
-```bash
-docker compose exec api python -m app.cli ingest --manifest /data/manifest.json
-docker compose exec api python -m app.cli process --limit 10
-```
-
-Repeat `process` with no limit to resume queued and failed records. A completed call is never re-transcribed on an API request. Processing marks calls `queued`, `processing`, `complete`, or `failed`; failures retain their error text for targeted retries.
-
-## Evidence policy
-
-Every returned intent, mood, resolution, summary, and attention-score contribution includes a transcript turn ID, timestamp range, and exact quote. If no matching supported evidence exists, that finding is omitted (`null`). The initial analyzer is deliberately conservative and deterministic; swap in an approved model only if its structured output is validated against transcript spans before persistence.
+The supplied dataset has been verified locally: 1,441 stereo, 8 kHz MP3s pair cleanly with 1,441 JSON files under `audio/` and `metadata/`. The source mapping is fixed: **left channel → agent** and **right channel → customer**.
 
 ## Product coverage
 
-- FastAPI API: calls/details, customers, and manager attention queue.
-- PostgreSQL/Supabase-compatible persistence for calls, transcript turns, and analysis.
-- ffmpeg channel split plus Faster-Whisper timestamped transcription.
-- Next.js dashboard: attention queue, customer directory, playable call detail, transcript, and evidence-backed analysis.
+- Resumable states: `DISCOVERED → VALIDATED → TRANSCRIBING → TRANSCRIBED → ANALYZING → ANALYZED → READY`, plus retryable `FAILED`.
+- FFmpeg channel extraction and faster-whisper transcription for deterministic speaker attribution.
+- Persisted transcript turns, controlled intent taxonomy, resolution, ≤40-word summary, customer mood events, mood shift, topics, and a 0–100 attention score.
+- Every retained intent, resolution, summary, mood event, and attention contribution has an exact quoted transcript span, timestamp, speaker, and segment ID. Unsupported claims are omitted.
+- FastAPI v1 API, PostgreSQL/Supabase-compatible persistence, local or private Supabase audio storage, and a Next.js/TypeScript dashboard.
+- Dashboard routes: Overview, Manager Attention, Customers and history, Calls and filters, Trends, Agents, and a seekable call-review screen.
 
-Issue-trend and agent-metric aggregate endpoints are the next implementation increment once real metadata fields and reviewed analysis labels are available; inventing those mappings without the source data would make them unreliable.
+The attention score uses fixed, auditable weights. Repeat-contact and long-wait signals are included only when the caller explicitly says so in the recording; source metadata alone is never used as claim evidence. Scores are capped at 100.
+
+## Repository and data handling
+
+Raw recordings, extracted data, local databases, Whisper cache, `.env`, and working files are all ignored by Git. Do not commit bank recordings or credentials.
+
+The expected local source layout is:
+
+```text
+data/callradar-data/
+├── audio/<call-id>.mp3
+└── metadata/<call-id>.json
+```
+
+If starting from the provided archive:
+
+```bash
+mkdir -p data
+unzip data/callradar-data.zip -d data
+```
+
+This produces `data/callradar-data/`. The archive and the extracted files remain local only.
+
+## Quick start with Docker
+
+Prerequisites: Docker Desktop and the locally extracted dataset above.
+
+```bash
+cp .env.example .env
+# Edit .env: set OPENAI_API_KEY for production analysis, and replace the default
+# PostgreSQL password before using a shared environment. Set
+# COMPOSE_DATABASE_URL only when using a managed Postgres database.
+
+docker compose up --build -d
+curl --fail http://localhost:8000/health
+```
+
+Open the dashboard at `http://localhost:3000` and the API documentation at `http://localhost:8000/docs`.
+
+Ingest and validate the real dataset before running the full job:
+
+```bash
+docker compose exec api python -m app.cli ingest-dataset \
+  --dataset-root /data/callradar-data --media-root /data
+
+docker compose exec api python -m app.cli validate --media-root /data --limit 20
+docker compose exec api python -m app.cli process --media-root /data --limit 20
+```
+
+Review the sample in the dashboard and the golden-set worksheet. Then resume every non-terminal call with the opt-in worker:
+
+```bash
+docker compose --profile worker run --rm worker
+```
+
+The worker exits after the current queue is empty. It is intentionally single-worker/resumable; rerun it to continue after an interruption. To retry only known failures after inspecting their stored errors:
+
+```bash
+docker compose exec api python -m app.cli retry --media-root /data
+```
+
+## Native development
+
+Prerequisites: Python 3.12+, Node.js 22+, FFmpeg, and the source data. FFmpeg is installed in the API container; native development needs it on `PATH`.
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r backend/requirements-dev.txt
+npm ci --prefix frontend
+cp .env.example .env
+```
+
+Create a local database and apply the migration:
+
+```bash
+DATABASE_URL=sqlite:///./data/callradar.db \
+PYTHONPATH=backend .venv/bin/alembic -c backend/alembic.ini upgrade head
+```
+
+Ingest and process a sample:
+
+```bash
+DATABASE_URL=sqlite:///./data/callradar.db \
+PYTHONPATH=backend .venv/bin/python scripts/process_dataset.py \
+  --input data/callradar-data --media-root data --limit 20
+```
+
+Run the API and dashboard in separate terminals:
+
+```bash
+DATABASE_URL=sqlite:///./data/callradar.db MEDIA_ROOT=data \
+PYTHONPATH=backend .venv/bin/uvicorn app.main:app --reload --port 8000
+```
+
+```bash
+NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev --prefix frontend
+```
+
+The pipeline defaults to OpenAI-backed structured analysis when `OPENAI_API_KEY` is set. For a no-network smoke test, set `ANALYSIS_PROVIDER=rules`; the evidence gate and persistent data contract remain active.
+
+## Operational commands
+
+All commands persist progress and are safe to rerun. Expensive processing happens only in these commands, never in FastAPI routes.
+
+```bash
+# Initialize the configured schema (the API also applies migrations in Docker)
+PYTHONPATH=backend .venv/bin/python -m app.cli init-db
+
+# Dataset-specific source adapter
+PYTHONPATH=backend .venv/bin/python -m app.cli ingest-dataset \
+  --dataset-root data/callradar-data --media-root data
+
+# Validate source files, then process a bounded sample or all resumable records
+PYTHONPATH=backend .venv/bin/python -m app.cli validate --media-root data --limit 20
+PYTHONPATH=backend .venv/bin/python -m app.cli process --media-root data --limit 20
+PYTHONPATH=backend .venv/bin/python -m app.cli process --media-root data
+PYTHONPATH=backend .venv/bin/python -m app.cli retry --media-root data
+
+# Re-run only persisted READY calls after intentionally changing the analysis
+# prompt/model/evidence policy; transcripts are preserved.
+PYTHONPATH=backend .venv/bin/python -m app.cli reanalyse --media-root data --limit 20
+
+# Generate a human-review worksheet after READY calls exist
+PYTHONPATH=backend .venv/bin/python scripts/export_golden_set.py \
+  --size 25 --output work/golden-set-review.csv
+```
+
+Check progress at `GET /api/v1/processing/progress`. Failed records retain an error message and are never silently retried by a dashboard/API request.
+
+## API
+
+The versioned API is documented at `/docs`. Core routes are:
+
+```text
+GET /api/v1/calls
+GET /api/v1/calls/{call_id}
+GET /api/v1/calls/{call_id}/audio
+GET /api/v1/attention
+GET /api/v1/customers
+GET /api/v1/customers/{customer_id}
+GET /api/v1/customers/{customer_id}/calls
+GET /api/v1/trends
+GET /api/v1/agents
+GET /api/v1/agents/{agent_id}
+GET /api/v1/processing/progress
+```
+
+`GET /api/v1/calls` supports customer, agent, date, intent, resolution, mood, minimum attention score, duration, status, search, `limit`, and `offset` filters. The audio route redirects to a local restricted MP3 route in development or a time-limited private Supabase URL in production.
+
+## Storage and hosted deployment
+
+PostgreSQL/Supabase Postgres is the deployment database. For private Supabase Storage, create a **private** bucket and configure `STORAGE_PROVIDER=supabase`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, and `SUPABASE_BUCKET`. The service-role key must remain server-side.
+
+After ingestion, upload the original recordings once:
+
+```bash
+PYTHONPATH=backend .venv/bin/python -m app.cli sync-storage --media-root data
+```
+
+Use a separate API service, worker service, and frontend service against the same PostgreSQL database. Set `NEXT_PUBLIC_API_URL` to the browser-reachable API origin, and use `API_INTERNAL_URL` only for the dashboard server's private API route. The Docker Compose stack demonstrates both values correctly.
+
+Detailed deployment steps are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The QA/release gate and human evidence-review procedure are in [docs/QA-RUNBOOK.md](docs/QA-RUNBOOK.md).
+
+## Tests and release gate
+
+```bash
+PYTHONPATH=backend .venv/bin/python -m pytest backend/tests -q
+npm run build --prefix frontend
+```
+
+The GitHub Actions workflow runs backend tests, a clean Alembic migration, and the production dashboard build. Before marking the all-call run complete, review a 20–30-call golden set against the audio, ensure every remaining failure is triaged, and validate the exact evidence-to-audio interaction in the dashboard.
+
+## Security note
+
+Treat all recordings, transcripts, participant names, database URLs, OpenAI keys, and Supabase service-role keys as sensitive. In a deployment, set `API_ACCESS_TOKEN` (or use an identity-aware proxy) so API and audio routes are not public; the dashboard passes that token only from its server-rendering process. Use a secret manager, keep the audio bucket private, restrict `CORS_ORIGINS`, and rotate any key that has ever been pasted into a chat, terminal, or log.
