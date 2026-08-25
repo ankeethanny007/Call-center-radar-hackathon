@@ -17,12 +17,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Call-Centre Radar offline processing")
     parser.add_argument(
         "command",
-        choices=("init-db", "ingest-manifest", "ingest-dataset", "validate", "process", "retry", "reanalyse", "sync-storage"),
+        choices=("init-db", "ingest-manifest", "ingest-dataset", "validate", "process", "retry", "reanalyse", "reprocess", "sync-storage"),
     )
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--dataset-root", type=Path)
     parser.add_argument("--media-root", type=Path, default=settings.media_root)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--call-id", action="append", dest="call_ids")
     args = parser.parse_args()
     upgrade_database()
     if args.command == "init-db":
@@ -62,6 +63,8 @@ def main() -> None:
                 Call.processing_status == "READY",
                 Call.transcript_segments.any(),
             ).order_by(Call.created_at)
+            if args.call_ids:
+                query = query.filter(Call.id.in_(args.call_ids))
             if args.limit:
                 query = query.limit(args.limit)
             calls = query.all()
@@ -75,8 +78,29 @@ def main() -> None:
             db.commit()
             result = process_batch(db, args.media_root, call_ids=call_ids)
             print(json.dumps({"queued_for_reanalysis": len(call_ids), **result}))
+        elif args.command == "reprocess":
+            if not args.call_ids:
+                parser.error("--call-id is required for reprocess")
+            calls = db.query(Call).filter(Call.id.in_(args.call_ids)).all()
+            found = {call.id for call in calls}
+            missing = sorted(set(args.call_ids) - found)
+            if missing:
+                parser.error(f"Unknown call ID(s): {', '.join(missing)}")
+            for call in calls:
+                call.processing_status = "DISCOVERED"
+                call.processing_error = None
+                call.processed_at = None
+            db.commit()
+            result = process_batch(db, args.media_root, call_ids=found)
+            print(json.dumps({"queued_for_reprocessing": len(found), **result}))
         else:
-            print(json.dumps(process_batch(db, args.media_root, limit=args.limit, retry_failed=args.command == "retry")))
+            print(json.dumps(process_batch(
+                db,
+                args.media_root,
+                limit=args.limit,
+                retry_failed=args.command == "retry",
+                call_ids=args.call_ids,
+            )))
     finally:
         db.close()
 

@@ -136,6 +136,11 @@ PYTHONPATH=backend .venv/bin/python -m app.cli retry --media-root data
 # prompt/model/evidence policy; transcripts are preserved.
 PYTHONPATH=backend .venv/bin/python -m app.cli reanalyse --media-root data --limit 20
 
+# Re-transcribe and re-analyze one specific call after changing the speech model
+# or timestamp segmentation policy.
+PYTHONPATH=backend .venv/bin/python -m app.cli reprocess \
+  --media-root data --call-id <call-id>
+
 # Generate a human-review worksheet after READY calls exist
 PYTHONPATH=backend .venv/bin/python scripts/export_golden_set.py \
   --size 25 --output work/golden-set-review.csv

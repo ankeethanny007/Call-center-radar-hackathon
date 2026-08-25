@@ -168,6 +168,7 @@ class RuleAnalysisEngine:
         "login": ("login", "log in", "password", "sign in"),
         "account": ("account", "balance", "statement"),
         "complaint": ("complaint", "complain", "unacceptable"),
+        "general_inquiry": ("schedule an appointment", "appointment", "opening hours", "branch hours"),
     }
 
     def analyse(self, segments: list[TranscriptSegment], repeat_call_count: int = 0, duration_seconds: float | None = None) -> AnalysisCandidate:
@@ -286,6 +287,17 @@ def validate_candidate_evidence(
     candidate: AnalysisCandidate, segments: dict[int, TranscriptSegment], engine: RuleAnalysisEngine | OpenAIAnalysisEngine
 ) -> AnalysisCandidate:
     """Reject unsupported claims before persistence; no valid citation means no returned claim."""
+    customer_segments = sorted((segment for segment in segments.values() if segment.speaker == "customer"), key=lambda item: item.start_ms)
+    if customer_segments:
+        final_customer = customer_segments[-1]
+        closing = normalize(final_customer.text)
+        # A clearly grateful closing is direct evidence for the customer's
+        # terminal mood. It does not imply that the underlying issue resolved.
+        if any(term in closing for term in ("thank you", "thanks", "all set", "that'll be all", "that will be all")):
+            candidate.mood_events = [event for event in candidate.mood_events if event.segment_id != final_customer.id]
+            candidate.mood_events.append(
+                MoodCandidate(segment_id=final_customer.id, mood="satisfied", score=MOOD_SCORES["satisfied"], quote=final_customer.text)
+            )
     entries: list[tuple[str, str, EvidencePointer]] = []
     if candidate.intent_category and candidate.intent_description and candidate.intent_evidence:
         # The controlled category is a manager-facing judgment too. Validate it with

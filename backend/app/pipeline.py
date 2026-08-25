@@ -269,6 +269,42 @@ def validate_call(call: Call, media_root: Path, source: Path | None = None) -> N
 _whisper_model = None
 
 
+def split_word_timestamps(words: Iterable[Any], fallback_confidence: float | None) -> list[tuple[int, int, str, float | None]]:
+    """Turn word timestamps into seekable utterances separated by real pauses.
+
+    Whisper can place several short phrases separated by tens of seconds of
+    silence into one segment. Using that segment's start time makes later words
+    (for example an appointment time) seek to the wrong place in the audio.
+    """
+    chunks: list[tuple[int, int, str, float | None]] = []
+    tokens: list[str] = []
+    chunk_start: float | None = None
+    chunk_end: float | None = None
+
+    def flush() -> None:
+        nonlocal tokens, chunk_start, chunk_end
+        text = "".join(tokens).strip()
+        if text and chunk_start is not None and chunk_end is not None:
+            chunks.append((int(chunk_start * 1000), int(chunk_end * 1000), text, fallback_confidence))
+        tokens, chunk_start, chunk_end = [], None, None
+
+    for word in words:
+        start, end, text = getattr(word, "start", None), getattr(word, "end", None), getattr(word, "word", "")
+        if start is None or end is None or not str(text).strip():
+            continue
+        if chunk_start is not None and chunk_end is not None:
+            pause = float(start) - chunk_end
+            proposed_duration = float(end) - chunk_start
+            if pause >= settings.whisper_utterance_gap_seconds or proposed_duration > settings.whisper_max_utterance_seconds:
+                flush()
+        if chunk_start is None:
+            chunk_start = float(start)
+        chunk_end = float(end)
+        tokens.append(str(text))
+    flush()
+    return chunks
+
+
 def transcribe_channel(audio: Path, channel: int, output: Path) -> list[tuple[int, int, str, float | None]]:
     """Split a known stereo channel and transcribe it. Attribution is never inferred."""
     # `-map_channel` was removed in modern FFmpeg; pan explicitly selects the
@@ -288,12 +324,24 @@ def transcribe_channel(audio: Path, channel: int, output: Path) -> list[tuple[in
             compute_type=settings.whisper_compute_type,
             download_root=str(settings.whisper_download_root),
         )
-    stream, _info = _whisper_model.transcribe(str(output), vad_filter=True, beam_size=5)
+    stream, _info = _whisper_model.transcribe(
+        str(output),
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 500},
+        beam_size=5,
+        word_timestamps=True,
+        condition_on_previous_text=False,
+    )
     segments: list[tuple[int, int, str, float | None]] = []
     for item in stream:
-        text = item.text.strip()
-        if text:
-            segments.append((int(item.start * 1000), int(item.end * 1000), text, getattr(item, "avg_logprob", None)))
+        confidence = getattr(item, "avg_logprob", None)
+        word_chunks = split_word_timestamps(getattr(item, "words", ()) or (), confidence)
+        if word_chunks:
+            segments.extend(word_chunks)
+        else:
+            text = item.text.strip()
+            if text:
+                segments.append((int(item.start * 1000), int(item.end * 1000), text, confidence))
     return segments
 
 
@@ -396,7 +444,12 @@ def process_call(db: Session, call: Call, media_root: Path) -> None:
             # transcript rather than falsely publishing an empty result.
             call.processing_status = "TRANSCRIBED"
 
-        if call.processing_status not in ("TRANSCRIBED", "ANALYZING") or not call.transcript_segments:
+        # A FAILED call with a fully persisted transcript failed during analysis,
+        # so retry that stage without paying for or risking a second transcription.
+        # DISCOVERED is kept as an explicit force-retranscription state for the
+        # targeted ``reprocess`` command.
+        needs_transcription = not call.transcript_segments or call.processing_status in ("DISCOVERED", "VALIDATED", "TRANSCRIBING")
+        if needs_transcription:
             scratch = create_scratch_dir(media_root, call.id)
             source = storage.materialize(call.audio_path, media_root, scratch)
             validate_call(call, media_root, source=source)
@@ -406,7 +459,12 @@ def process_call(db: Session, call: Call, media_root: Path) -> None:
             records = [("agent", *record) for record in transcribe_channel(source, 0, scratch / "agent.wav")]
             records.extend(("customer", *record) for record in transcribe_channel(source, 1, scratch / "customer.wav"))
             records.sort(key=lambda item: (item[1], item[2], item[0]))
-            db.query(TranscriptSegment).filter_by(call_id=call.id).delete()
+            if call.transcript_segments:
+                # Existing analysis/evidence references the old transcript.
+                # Remove it first so targeted retranscription is safe with
+                # PostgreSQL foreign-key enforcement.
+                clear_analysis(db, call)
+            db.query(TranscriptSegment).filter_by(call_id=call.id).delete(synchronize_session=False)
             for speaker, start_ms, end_ms, text, confidence in records:
                 db.add(TranscriptSegment(call_id=call.id, speaker=speaker, start_ms=start_ms, end_ms=end_ms, text=text, confidence=confidence))
             db.flush()

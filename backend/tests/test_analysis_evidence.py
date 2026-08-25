@@ -68,3 +68,28 @@ def test_mood_scores_are_fixed_after_evidence_validation() -> None:
     validated = validate_candidate_evidence(candidate, {source.id: source}, RuleAnalysisEngine())
 
     assert validated.mood_events[0].score == MOOD_SCORES["frustrated"]
+
+
+def test_grateful_final_customer_turn_is_evidenced_as_satisfied() -> None:
+    segments = [
+        segment(1, "customer", "I am confused about the appointment.", 1_000),
+        segment(2, "customer", "Thank you. Bye.", 8_000),
+    ]
+    candidate = RuleAnalysisEngine().analyse(segments)
+
+    validated = validate_candidate_evidence(candidate, {item.id: item for item in segments}, RuleAnalysisEngine())
+
+    final_mood = sorted(validated.mood_events, key=lambda item: item.segment_id)[-1]
+    assert final_mood.segment_id == 2
+    assert final_mood.mood == "satisfied"
+    assert final_mood.quote == "Thank you. Bye."
+
+
+def test_appointment_request_maps_to_general_inquiry() -> None:
+    source = segment(1, "customer", "I would like to schedule an appointment.")
+
+    candidate = RuleAnalysisEngine().analyse([source])
+
+    assert candidate.intent_category == "general_inquiry"
+    assert candidate.intent_evidence is not None
+    assert candidate.intent_evidence.quote == source.text
