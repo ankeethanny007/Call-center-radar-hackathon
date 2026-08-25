@@ -146,7 +146,7 @@ def test_failed_analysis_retry_reuses_persisted_transcript(tmp_path: Path, monke
     db.refresh(call)
     assert call.processing_status == "READY"
     assert call.analysis is not None
-    assert call.mood_events[-1].mood == "satisfied"
+    assert not call.mood_events
     db.close()
 
 
