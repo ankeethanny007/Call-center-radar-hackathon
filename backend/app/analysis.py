@@ -289,14 +289,38 @@ def validate_candidate_evidence(
     """Reject unsupported claims before persistence; no valid citation means no returned claim."""
     customer_segments = sorted((segment for segment in segments.values() if segment.speaker == "customer"), key=lambda item: item.start_ms)
     if customer_segments:
-        final_customer = customer_segments[-1]
-        closing = normalize(final_customer.text)
-        # A clearly grateful closing is direct evidence for the customer's
-        # terminal mood. It does not imply that the underlying issue resolved.
-        if any(term in closing for term in ("thank you", "thanks", "all set", "that'll be all", "that will be all")):
-            candidate.mood_events = [event for event in candidate.mood_events if event.segment_id != final_customer.id]
+        # Search the final customer turns because channel-level word timestamps can
+        # put a short farewell after the substantive closing statement. A grateful
+        # close or an explicit statement that no more help is needed is direct
+        # evidence for terminal satisfaction. It does not imply issue resolution.
+        closing_customer = next(
+            (
+                segment
+                for segment in reversed(customer_segments[-3:])
+                if any(
+                    term in normalize(segment.text)
+                    for term in (
+                        "thank you",
+                        "thanks",
+                        "all set",
+                        "that's all",
+                        "that is all",
+                        "that'll be all",
+                        "that will be all",
+                    )
+                )
+            ),
+            None,
+        )
+        if closing_customer:
+            candidate.mood_events = [event for event in candidate.mood_events if event.segment_id != closing_customer.id]
             candidate.mood_events.append(
-                MoodCandidate(segment_id=final_customer.id, mood="satisfied", score=MOOD_SCORES["satisfied"], quote=final_customer.text)
+                MoodCandidate(
+                    segment_id=closing_customer.id,
+                    mood="satisfied",
+                    score=MOOD_SCORES["satisfied"],
+                    quote=closing_customer.text,
+                )
             )
     entries: list[tuple[str, str, EvidencePointer]] = []
     if candidate.intent_category and candidate.intent_description and candidate.intent_evidence:

@@ -85,6 +85,22 @@ def test_grateful_final_customer_turn_is_evidenced_as_satisfied() -> None:
     assert final_mood.quote == "Thank you. Bye."
 
 
+def test_explicit_no_more_help_before_farewell_is_satisfied() -> None:
+    segments = [
+        segment(1, "customer", "Well, no, that's all for today.", 30_000),
+        segment(2, "customer", "You too.", 40_000),
+        segment(3, "customer", "Bye-bye.", 45_000),
+    ]
+    candidate = RuleAnalysisEngine().analyse(segments)
+
+    validated = validate_candidate_evidence(candidate, {item.id: item for item in segments}, RuleAnalysisEngine())
+
+    final_mood = sorted(validated.mood_events, key=lambda item: item.segment_id)[-1]
+    assert final_mood.segment_id == 1
+    assert final_mood.mood == "satisfied"
+    assert final_mood.quote == "Well, no, that's all for today."
+
+
 def test_appointment_request_maps_to_general_inquiry() -> None:
     source = segment(1, "customer", "I would like to schedule an appointment.")
 
