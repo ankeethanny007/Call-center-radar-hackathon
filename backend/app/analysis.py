@@ -348,6 +348,15 @@ def validate_candidate_evidence(
     candidate: AnalysisCandidate, segments: dict[int, TranscriptSegment], engine: RuleAnalysisEngine | OpenAIAnalysisEngine
 ) -> AnalysisCandidate:
     """Reject unsupported claims before persistence; no valid citation means no returned claim."""
+    if candidate.resolution_status == "RESOLVED":
+        # These signals describe failure to answer/resolve. They are logically
+        # incompatible with an evidenced resolved outcome, even if a model emits
+        # them with prose that actually praises the agent.
+        candidate.attention_contributions = [
+            item
+            for item in candidate.attention_contributions
+            if item.signal not in {"issue_unresolved", "agent_unable_to_answer"}
+        ]
     customer_segments = sorted((segment for segment in segments.values() if segment.speaker == "customer"), key=lambda item: item.start_ms)
     if customer_segments:
         # Search the final customer turns because channel-level word timestamps can
