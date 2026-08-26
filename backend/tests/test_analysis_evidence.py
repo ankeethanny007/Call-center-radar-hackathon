@@ -135,6 +135,26 @@ def test_matching_transfer_amount_is_resolved_and_satisfied() -> None:
     assert validated.mood_events[-1].mood == "satisfied"
 
 
+def test_customer_joke_is_not_frustration_but_agent_laughter_needs_review() -> None:
+    segments = [
+        segment(1, "customer", "I need to check my account balance.", 10_000),
+        segment(2, "agent", "Your savings account balance is $65.", 20_000),
+        segment(3, "customer", "Can you help me get more money?", 30_000),
+        segment(6, "agent", "Unfortunately, I cannot do that.", 35_000),
+        segment(4, "customer", "I appreciate your help checking my very low balance.", 40_000),
+        segment(5, "agent", "[laughter]", 50_000),
+    ]
+
+    candidate = RuleAnalysisEngine().analyse(segments)
+    validated = validate_candidate_evidence(candidate, {item.id: item for item in segments}, RuleAnalysisEngine())
+
+    assert validated.resolution_status == "RESOLVED"
+    assert validated.mood_events[-1].mood == "satisfied"
+    assert not any(item.mood == "frustrated" for item in validated.mood_events)
+    signals = {item.signal: item.points for item in validated.attention_contributions}
+    assert signals == {"unprofessional_agent_conduct": 35}
+
+
 def test_appointment_request_maps_to_general_inquiry() -> None:
     source = segment(1, "customer", "I would like to schedule an appointment.")
 
