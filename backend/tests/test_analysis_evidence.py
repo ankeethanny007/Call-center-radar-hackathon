@@ -1,4 +1,4 @@
-from app.analysis import ATTENTION_WEIGHTS, MOOD_SCORES, MoodCandidate, RuleAnalysisEngine, validate_candidate_evidence
+from app.analysis import ATTENTION_WEIGHTS, MOOD_SCORES, AnalysisCandidate, EvidencePointer, MoodCandidate, RuleAnalysisEngine, ScoreCandidate, validate_candidate_evidence
 from app.pipeline import metadata_record, validate_metadata_shape
 from app.models import TranscriptSegment
 
@@ -47,6 +47,22 @@ def test_summary_is_hard_limited_to_forty_words() -> None:
     candidate = RuleAnalysisEngine().analyse([segment(1, "customer", text)])
     assert candidate.summary is not None
     assert len(candidate.summary.split()) == 40
+
+
+def test_resolved_call_rejects_contradictory_negative_attention_signals() -> None:
+    answer = segment(1, "agent", "Your savings account balance is $172.")
+    candidate = AnalysisCandidate(
+        resolution_status="RESOLVED",
+        resolution_evidence=EvidencePointer(segment_id=1, quote=answer.text),
+        attention_contributions=[
+            ScoreCandidate(signal="issue_unresolved", points=25, explanation="Issue was resolved.", evidence=EvidencePointer(segment_id=1, quote=answer.text)),
+            ScoreCandidate(signal="agent_unable_to_answer", points=15, explanation="Agent answered correctly.", evidence=EvidencePointer(segment_id=1, quote=answer.text)),
+        ],
+    )
+
+    validated = validate_candidate_evidence(candidate, {answer.id: answer}, RuleAnalysisEngine())
+
+    assert validated.attention_contributions == []
 
 
 def test_repeat_contact_and_wait_signals_require_customer_words() -> None:
