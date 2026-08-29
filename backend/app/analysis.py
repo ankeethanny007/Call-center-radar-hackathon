@@ -45,6 +45,7 @@ ATTENTION_WEIGHTS = {
     "abnormal_handle_time": 10,
     "transaction_amount_requested": 35,
     "transaction_amount_mismatch": 50,
+    "unprofessional_agent_conduct": 35,
 }
 
 
@@ -206,7 +207,7 @@ class RuleAnalysisEngine:
         negative = first_match(customers, ("angry", "frustrated", "unacceptable", "terrible", "complaint", "ridiculous"))
         persistent_negative = first_match(customers, ("still frustrated", "still angry", "still upset", "still unacceptable", "still disappointed"))
         concerned = first_match(customers, ("worried", "concerned", "don't recognize", "do not recognize", "confused"))
-        positive = first_match(customers, ("very helpful", "that was helpful", "great service", "excellent", "perfect"))
+        positive = first_match(customers, ("very helpful", "that was helpful", "appreciate your help", "great service", "excellent", "perfect"))
         if concerned:
             candidate.mood_events.append(MoodCandidate(segment_id=concerned.id, mood="concerned", score=35, quote=concerned.text))
         if negative:
@@ -248,6 +249,11 @@ class RuleAnalysisEngine:
             candidate.resolution_status = "RESOLVED"
             candidate.resolution_evidence = pointer(confirmation_segment)
 
+        balance_provided = first_match(agents, ("balance is", "account balance is"))
+        if candidate.intent_category == "account" and balance_provided and not unresolved:
+            candidate.resolution_status = "RESOLVED"
+            candidate.resolution_evidence = pointer(balance_provided)
+
         escalation = first_match(customers, ("manager", "supervisor", "escalate", "complaint"))
         repeat_question = first_match(customers, ("already told", "already explained", "repeat myself", "third time"))
         # A source name by itself is not sufficient evidence for a manager-facing score.
@@ -268,7 +274,7 @@ class RuleAnalysisEngine:
             candidate.attention_contributions.append(ScoreCandidate(signal="repeated_question", points=10, explanation="Customer indicated they had to repeat information.", evidence=pointer(repeat_question)))
         if repeat_caller:
             candidate.attention_contributions.append(ScoreCandidate(signal="repeat_caller", points=10, explanation="Customer explicitly said this was a repeat contact.", evidence=pointer(repeat_caller)))
-        if unable:
+        if unable and candidate.resolution_status != "RESOLVED":
             candidate.attention_contributions.append(ScoreCandidate(signal="agent_unable_to_answer", points=15, explanation="Agent indicated they could not provide an answer.", evidence=pointer(unable)))
         if negative and escalation:
             candidate.attention_contributions.append(ScoreCandidate(signal="serious_complaint", points=20, explanation="Customer made a serious complaint or escalation request.", evidence=pointer(escalation)))
@@ -276,6 +282,16 @@ class RuleAnalysisEngine:
             candidate.attention_contributions.append(ScoreCandidate(signal="persistent_negative_mood", points=15, explanation="Customer explicitly described persistent negative sentiment.", evidence=pointer(persistent_negative)))
         if abnormal_handle_time:
             candidate.attention_contributions.append(ScoreCandidate(signal="abnormal_handle_time", points=10, explanation="Customer explicitly reported a prolonged wait or handling time.", evidence=pointer(abnormal_handle_time)))
+        inappropriate_laughter = first_match(agents, ("[laughter]", "[laughs]", "[chuckles]"))
+        if inappropriate_laughter:
+            candidate.attention_contributions.append(
+                ScoreCandidate(
+                    signal="unprofessional_agent_conduct",
+                    points=ATTENTION_WEIGHTS["unprofessional_agent_conduct"],
+                    explanation="Agent laughed at the end of the customer interaction; manager review is recommended.",
+                    evidence=pointer(inappropriate_laughter),
+                )
+            )
         return candidate
 
 
@@ -332,6 +348,15 @@ def validate_candidate_evidence(
     candidate: AnalysisCandidate, segments: dict[int, TranscriptSegment], engine: RuleAnalysisEngine | OpenAIAnalysisEngine
 ) -> AnalysisCandidate:
     """Reject unsupported claims before persistence; no valid citation means no returned claim."""
+    if candidate.resolution_status == "RESOLVED":
+        # These signals describe failure to answer/resolve. They are logically
+        # incompatible with an evidenced resolved outcome, even if a model emits
+        # them with prose that actually praises the agent.
+        candidate.attention_contributions = [
+            item
+            for item in candidate.attention_contributions
+            if item.signal not in {"issue_unresolved", "agent_unable_to_answer"}
+        ]
     customer_segments = sorted((segment for segment in segments.values() if segment.speaker == "customer"), key=lambda item: item.start_ms)
     if customer_segments:
         # Search the final customer turns because channel-level word timestamps can
@@ -339,7 +364,7 @@ def validate_candidate_evidence(
         # close or an explicit statement that no more help is needed is direct
         # evidence for terminal satisfaction. It does not imply issue resolution.
         explicit_praise = next(
-            (segment for segment in reversed(customer_segments[-3:]) if any(term in normalize(segment.text) for term in ("very helpful", "great service", "excellent", "perfect"))),
+            (segment for segment in reversed(customer_segments[-3:]) if any(term in normalize(segment.text) for term in ("very helpful", "appreciate your help", "great service", "excellent", "perfect"))),
             None,
         )
         closing_customer = explicit_praise or next(

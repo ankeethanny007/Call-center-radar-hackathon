@@ -1,4 +1,4 @@
-from app.analysis import ATTENTION_WEIGHTS, MOOD_SCORES, MoodCandidate, RuleAnalysisEngine, validate_candidate_evidence
+from app.analysis import ATTENTION_WEIGHTS, MOOD_SCORES, AnalysisCandidate, EvidencePointer, MoodCandidate, RuleAnalysisEngine, ScoreCandidate, validate_candidate_evidence
 from app.pipeline import metadata_record, validate_metadata_shape
 from app.models import TranscriptSegment
 
@@ -47,6 +47,22 @@ def test_summary_is_hard_limited_to_forty_words() -> None:
     candidate = RuleAnalysisEngine().analyse([segment(1, "customer", text)])
     assert candidate.summary is not None
     assert len(candidate.summary.split()) == 40
+
+
+def test_resolved_call_rejects_contradictory_negative_attention_signals() -> None:
+    answer = segment(1, "agent", "Your savings account balance is $172.")
+    candidate = AnalysisCandidate(
+        resolution_status="RESOLVED",
+        resolution_evidence=EvidencePointer(segment_id=1, quote=answer.text),
+        attention_contributions=[
+            ScoreCandidate(signal="issue_unresolved", points=25, explanation="Issue was resolved.", evidence=EvidencePointer(segment_id=1, quote=answer.text)),
+            ScoreCandidate(signal="agent_unable_to_answer", points=15, explanation="Agent answered correctly.", evidence=EvidencePointer(segment_id=1, quote=answer.text)),
+        ],
+    )
+
+    validated = validate_candidate_evidence(candidate, {answer.id: answer}, RuleAnalysisEngine())
+
+    assert validated.attention_contributions == []
 
 
 def test_repeat_contact_and_wait_signals_require_customer_words() -> None:
@@ -133,6 +149,26 @@ def test_matching_transfer_amount_is_resolved_and_satisfied() -> None:
     assert validated.resolution_evidence is not None
     assert not validated.attention_contributions
     assert validated.mood_events[-1].mood == "satisfied"
+
+
+def test_customer_joke_is_not_frustration_but_agent_laughter_needs_review() -> None:
+    segments = [
+        segment(1, "customer", "I need to check my account balance.", 10_000),
+        segment(2, "agent", "Your savings account balance is $65.", 20_000),
+        segment(3, "customer", "Can you help me get more money?", 30_000),
+        segment(6, "agent", "Unfortunately, I cannot do that.", 35_000),
+        segment(4, "customer", "I appreciate your help checking my very low balance.", 40_000),
+        segment(5, "agent", "[laughter]", 50_000),
+    ]
+
+    candidate = RuleAnalysisEngine().analyse(segments)
+    validated = validate_candidate_evidence(candidate, {item.id: item for item in segments}, RuleAnalysisEngine())
+
+    assert validated.resolution_status == "RESOLVED"
+    assert validated.mood_events[-1].mood == "satisfied"
+    assert not any(item.mood == "frustrated" for item in validated.mood_events)
+    signals = {item.signal: item.points for item in validated.attention_contributions}
+    assert signals == {"unprofessional_agent_conduct": 35}
 
 
 def test_appointment_request_maps_to_general_inquiry() -> None:
