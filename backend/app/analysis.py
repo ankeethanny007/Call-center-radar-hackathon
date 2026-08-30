@@ -458,7 +458,7 @@ def validate_candidate_evidence(
         candidate.attention_contributions = [
             item
             for item in candidate.attention_contributions
-            if item.signal not in {"issue_unresolved", "agent_unable_to_answer"}
+            if item.signal not in {"issue_unresolved", "agent_unable_to_answer", "transaction_completion_unconfirmed"}
         ]
     customer_segments = sorted((segment for segment in segments.values() if segment.speaker == "customer"), key=lambda item: item.start_ms)
     if customer_segments:
