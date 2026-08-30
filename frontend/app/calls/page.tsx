@@ -5,5 +5,5 @@ import { api } from "../../lib/api";
 
 export default async function CallsPage() {
   const calls = await api.calls();
-  return <><PageHeader eyebrow="Call archive" title="Calls" description="Search, filter, and open persisted recordings and transcripts." /><ProcessNewCalls /><CallDirectory calls={calls} /></>;
+  return <><PageHeader eyebrow="Call archive" title="Calls" description="Search, filter, and open persisted recordings and transcripts." action={<ProcessNewCalls />} /><CallDirectory calls={calls} /></>;
 }
