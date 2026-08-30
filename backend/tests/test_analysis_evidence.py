@@ -57,6 +57,7 @@ def test_resolved_call_rejects_contradictory_negative_attention_signals() -> Non
         attention_contributions=[
             ScoreCandidate(signal="issue_unresolved", points=25, explanation="Issue was resolved.", evidence=EvidencePointer(segment_id=1, quote=answer.text)),
             ScoreCandidate(signal="agent_unable_to_answer", points=15, explanation="Agent answered correctly.", evidence=EvidencePointer(segment_id=1, quote=answer.text)),
+            ScoreCandidate(signal="transaction_completion_unconfirmed", points=40, explanation="Transaction was not confirmed.", evidence=EvidencePointer(segment_id=1, quote=answer.text)),
         ],
     )
 
