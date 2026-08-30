@@ -71,8 +71,10 @@ def test_unresolved_unanswered_combination_is_critical() -> None:
 
 
 def test_generic_call_closing_does_not_prove_resolution() -> None:
-    closing = segment(1, "customer", "No, that will be it.")
+    agent_close = segment(1, "agent", "Is there anything else I can help you with?")
+    closing = segment(2, "customer", "No, that will be it.", 5_000)
     candidate = AnalysisCandidate(
+        intent_category="payment",
         resolution_status="RESOLVED",
         resolution_evidence=EvidencePointer(segment_id=closing.id, quote=closing.text),
         attention_contributions=[
@@ -85,11 +87,12 @@ def test_generic_call_closing_does_not_prove_resolution() -> None:
         ],
     )
 
-    validated = validate_candidate_evidence(candidate, {closing.id: closing}, RuleAnalysisEngine())
+    validated = validate_candidate_evidence(candidate, {agent_close.id: agent_close, closing.id: closing}, RuleAnalysisEngine())
 
     assert validated.resolution_status == "UNKNOWN"
     assert validated.resolution_evidence is None
-    assert validated.attention_contributions == []
+    assert [(item.signal, item.points) for item in validated.attention_contributions] == [("transaction_completion_unconfirmed", 40)]
+    assert validated.attention_contributions[0].evidence.segment_id == agent_close.id
 
 
 def test_generated_summary_is_narrative_and_mentions_validated_issues() -> None:
