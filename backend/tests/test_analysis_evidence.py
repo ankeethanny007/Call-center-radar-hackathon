@@ -70,6 +70,28 @@ def test_unresolved_unanswered_combination_is_critical() -> None:
     assert score == 70
 
 
+def test_generic_call_closing_does_not_prove_resolution() -> None:
+    closing = segment(1, "customer", "No, that will be it.")
+    candidate = AnalysisCandidate(
+        resolution_status="RESOLVED",
+        resolution_evidence=EvidencePointer(segment_id=closing.id, quote=closing.text),
+        attention_contributions=[
+            ScoreCandidate(
+                signal="issue_unresolved",
+                points=40,
+                explanation="The issue was resolved, customer confirmed no further help needed.",
+                evidence=EvidencePointer(segment_id=closing.id, quote=closing.text),
+            )
+        ],
+    )
+
+    validated = validate_candidate_evidence(candidate, {closing.id: closing}, RuleAnalysisEngine())
+
+    assert validated.resolution_status == "UNKNOWN"
+    assert validated.resolution_evidence is None
+    assert validated.attention_contributions == []
+
+
 def test_generated_summary_is_narrative_and_mentions_validated_issues() -> None:
     request = segment(1, "customer", "I need to check my account balance.")
     laughter = segment(2, "agent", "[laughter]", 5_000)
