@@ -74,6 +74,7 @@ def test_unresolved_unanswered_combination_is_critical() -> None:
 def test_generic_call_closing_does_not_prove_resolution() -> None:
     agent_close = segment(1, "agent", "Is there anything else I can help you with?")
     closing = segment(2, "customer", "No, that will be it.", 5_000)
+    unrelated_later_close = segment(3, "agent", "Is there anything else regarding your account?", 8_000)
     candidate = AnalysisCandidate(
         intent_category="payment",
         resolution_status="RESOLVED",
@@ -88,7 +89,11 @@ def test_generic_call_closing_does_not_prove_resolution() -> None:
         ],
     )
 
-    validated = validate_candidate_evidence(candidate, {agent_close.id: agent_close, closing.id: closing}, RuleAnalysisEngine())
+    validated = validate_candidate_evidence(
+        candidate,
+        {agent_close.id: agent_close, closing.id: closing, unrelated_later_close.id: unrelated_later_close},
+        RuleAnalysisEngine(),
+    )
 
     assert validated.resolution_status == "UNKNOWN"
     assert validated.resolution_evidence is None

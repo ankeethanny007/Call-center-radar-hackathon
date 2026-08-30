@@ -428,9 +428,10 @@ def validate_candidate_evidence(
         if any(resolution_quote == closing for closing in generic_closings):
             # A caller ending the conversation can evidence their closing mood,
             # but cannot prove that the requested transaction or action occurred.
+            resolution_segment = segments.get(candidate.resolution_evidence.segment_id)
+            closing_start = resolution_segment.start_ms if resolution_segment else max((item.start_ms for item in segments.values()), default=0)
             candidate.resolution_status, candidate.resolution_evidence = "UNKNOWN", None
             if candidate.intent_category in {"payment", "transfer", "refund", "cash_withdrawal"}:
-                closing_start = segments.get(candidate.resolution_evidence.segment_id).start_ms if candidate.resolution_evidence and segments.get(candidate.resolution_evidence.segment_id) else max((item.start_ms for item in segments.values()), default=0)
                 premature_close = next(
                     (
                         item
