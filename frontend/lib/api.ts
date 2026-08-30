@@ -377,14 +377,20 @@ export const api = {
   async calls(): Promise<CallListItem[]> {
     try {
       const pageSize = 500;
-      const calls: CallListItem[] = [];
-      for (let offset = 0; ; offset += pageSize) {
+      const [firstResponse, progressResponse] = await Promise.all([
+        versioned<unknown>(`/calls?limit=${pageSize}&offset=0`, `/calls?limit=${pageSize}&offset=0`),
+        versioned<unknown>("/processing/progress").catch(() => null),
+      ]);
+      const firstPage = asArrayResponse(firstResponse).map(normalizeCall).filter((call) => call.id !== "unknown-call");
+      const total = progressResponse ? normalizeProgress(progressResponse).total : firstPage.length;
+      const offsets = Array.from({ length: Math.max(0, Math.ceil(total / pageSize) - 1) }, (_, index) => (index + 1) * pageSize);
+      const remaining = await Promise.all(offsets.map(async (offset) => {
         const query = `?limit=${pageSize}&offset=${offset}`;
-        const response = await versioned<unknown>(`/calls${query}`, `/calls${query}`);
-        const page = asArrayResponse(response).map(normalizeCall).filter((call) => call.id !== "unknown-call");
-        calls.push(...page);
-        if (page.length < pageSize) return calls;
-      }
+        return asArrayResponse(await versioned<unknown>(`/calls${query}`, `/calls${query}`))
+          .map(normalizeCall)
+          .filter((call) => call.id !== "unknown-call");
+      }));
+      return firstPage.concat(...remaining);
     } catch {
       return [];
     }
