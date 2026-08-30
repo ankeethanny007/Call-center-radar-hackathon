@@ -35,16 +35,17 @@ MOOD_SCORES = {
 RESOLUTIONS = ("RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "UNKNOWN")
 ATTENTION_WEIGHTS = {
     "highly_negative_customer": 25,
-    "issue_unresolved": 25,
+    "issue_unresolved": 40,
     "escalation_requested": 15,
     "persistent_negative_mood": 15,
     "repeated_question": 10,
     "repeat_caller": 10,
-    "agent_unable_to_answer": 15,
+    "agent_unable_to_answer": 30,
     "serious_complaint": 20,
     "abnormal_handle_time": 10,
     "transaction_amount_requested": 35,
     "transaction_amount_mismatch": 50,
+    "transaction_completion_unconfirmed": 40,
     "unprofessional_agent_conduct": 35,
 }
 
@@ -166,6 +167,7 @@ SUMMARY_INTENTS = {
 
 SUMMARY_ISSUES = {
     "transaction_amount_mismatch": "a transaction amount mismatch",
+    "transaction_completion_unconfirmed": "an unconfirmed transaction outcome",
     "unprofessional_agent_conduct": "inappropriate agent conduct",
     "highly_negative_customer": "strong customer dissatisfaction",
     "issue_unresolved": "an unresolved request",
@@ -330,7 +332,7 @@ class RuleAnalysisEngine:
         if negative:
             candidate.attention_contributions.append(ScoreCandidate(signal="highly_negative_customer", points=25, explanation="Customer expressed strong negative sentiment.", evidence=pointer(negative)))
         if unresolved:
-            candidate.attention_contributions.append(ScoreCandidate(signal="issue_unresolved", points=25, explanation="Customer explicitly indicated the issue remained unresolved.", evidence=pointer(unresolved)))
+            candidate.attention_contributions.append(ScoreCandidate(signal="issue_unresolved", points=ATTENTION_WEIGHTS["issue_unresolved"], explanation="Customer explicitly indicated the issue remained unresolved.", evidence=pointer(unresolved)))
         if escalation:
             candidate.attention_contributions.append(ScoreCandidate(signal="escalation_requested", points=15, explanation="Customer requested escalation or a manager.", evidence=pointer(escalation)))
         if repeat_question:
@@ -338,7 +340,7 @@ class RuleAnalysisEngine:
         if repeat_caller:
             candidate.attention_contributions.append(ScoreCandidate(signal="repeat_caller", points=10, explanation="Customer explicitly said this was a repeat contact.", evidence=pointer(repeat_caller)))
         if unable and candidate.resolution_status != "RESOLVED":
-            candidate.attention_contributions.append(ScoreCandidate(signal="agent_unable_to_answer", points=15, explanation="Agent indicated they could not provide an answer.", evidence=pointer(unable)))
+            candidate.attention_contributions.append(ScoreCandidate(signal="agent_unable_to_answer", points=ATTENTION_WEIGHTS["agent_unable_to_answer"], explanation="Agent indicated they could not provide an answer.", evidence=pointer(unable)))
         if negative and escalation:
             candidate.attention_contributions.append(ScoreCandidate(signal="serious_complaint", points=20, explanation="Customer made a serious complaint or escalation request.", evidence=pointer(escalation)))
         if persistent_negative:
@@ -380,7 +382,7 @@ Every non-null field must cite an existing transcript segment and an exact quote
 Use only this issue taxonomy: billing, fraud, card, account, login, payment, refund, cash_withdrawal, transfer, fees, complaint, general_inquiry, other.
 Use only RESOLVED, PARTIALLY_RESOLVED, UNRESOLVED, UNKNOWN for resolution.
 Use only positive, neutral, confused, concerned, frustrated, angry, distressed, satisfied for moods.
-Do not infer missing facts. Keep summary to 40 words maximum. Use only these attention signal names with their fixed weights: highly_negative_customer (25), issue_unresolved (25), escalation_requested (15), persistent_negative_mood (15), repeated_question (10), repeat_caller (10), agent_unable_to_answer (15), serious_complaint (20), abnormal_handle_time (10). A repeat_caller signal requires the customer to explicitly say this is a repeat contact. An abnormal_handle_time signal requires the customer to explicitly report a prolonged wait or handling time; never infer either signal from metadata. Every contribution needs a directly supporting citation."""
+Do not infer missing facts. Keep summary to 40 words maximum. Use only these attention signal names with their fixed weights: highly_negative_customer (25), issue_unresolved (40), escalation_requested (15), persistent_negative_mood (15), repeated_question (10), repeat_caller (10), agent_unable_to_answer (30), serious_complaint (20), abnormal_handle_time (10), transaction_completion_unconfirmed (40). A repeat_caller signal requires the customer to explicitly say this is a repeat contact. An abnormal_handle_time signal requires the customer to explicitly report a prolonged wait or handling time; never infer either signal from metadata. Every contribution needs a directly supporting citation."""
         payload = f"TRANSCRIPT:\n{transcript}"
         response = self.client.responses.create(
             model=settings.openai_model,
@@ -411,6 +413,45 @@ def validate_candidate_evidence(
     candidate: AnalysisCandidate, segments: dict[int, TranscriptSegment], engine: RuleAnalysisEngine | OpenAIAnalysisEngine
 ) -> AnalysisCandidate:
     """Reject unsupported claims before persistence; no valid citation means no returned claim."""
+    unconfirmed_transaction_evidence: EvidencePointer | None = None
+    if candidate.resolution_status == "RESOLVED" and candidate.resolution_evidence:
+        resolution_quote = normalize(candidate.resolution_evidence.quote).rstrip(".!?")
+        generic_closings = (
+            "no, that will be it",
+            "no that will be it",
+            "no, that'll be it",
+            "no that'll be it",
+            "nothing else",
+            "thank you",
+            "thanks",
+        )
+        if any(resolution_quote == closing for closing in generic_closings):
+            # A caller ending the conversation can evidence their closing mood,
+            # but cannot prove that the requested transaction or action occurred.
+            resolution_segment = segments.get(candidate.resolution_evidence.segment_id)
+            closing_start = resolution_segment.start_ms if resolution_segment else max((item.start_ms for item in segments.values()), default=0)
+            candidate.resolution_status, candidate.resolution_evidence = "UNKNOWN", None
+            if candidate.intent_category in {"payment", "transfer", "refund", "cash_withdrawal"}:
+                premature_close = next(
+                    (
+                        item
+                        for item in sorted(segments.values(), key=lambda value: value.start_ms, reverse=True)
+                        if item.speaker == "agent" and item.start_ms <= closing_start and "anything else" in normalize(item.text)
+                    ),
+                    None,
+                )
+                if premature_close:
+                    unconfirmed_transaction_evidence = pointer(premature_close)
+
+    candidate.attention_contributions = [
+        item
+        for item in candidate.attention_contributions
+        if not (
+            item.signal in {"issue_unresolved", "agent_unable_to_answer"}
+            and any(term in normalize(item.explanation) for term in ("issue was resolved", "successfully resolved", "request was completed"))
+            and "not resolved" not in normalize(item.explanation)
+        )
+    ]
     if candidate.resolution_status == "RESOLVED":
         # These signals describe failure to answer/resolve. They are logically
         # incompatible with an evidenced resolved outcome, even if a model emits
@@ -418,7 +459,7 @@ def validate_candidate_evidence(
         candidate.attention_contributions = [
             item
             for item in candidate.attention_contributions
-            if item.signal not in {"issue_unresolved", "agent_unable_to_answer"}
+            if item.signal not in {"issue_unresolved", "agent_unable_to_answer", "transaction_completion_unconfirmed"}
         ]
     customer_segments = sorted((segment for segment in segments.values() if segment.speaker == "customer"), key=lambda item: item.start_ms)
     if customer_segments:
@@ -520,6 +561,15 @@ def validate_candidate_evidence(
         selected_signals.add(item.signal)
         safe_contributions.append(item)
     candidate.attention_contributions = safe_contributions
+    if unconfirmed_transaction_evidence and "transaction_completion_unconfirmed" not in selected_signals:
+        candidate.attention_contributions.append(
+            ScoreCandidate(
+                signal="transaction_completion_unconfirmed",
+                points=ATTENTION_WEIGHTS["transaction_completion_unconfirmed"],
+                explanation="The agent moved to close the call without confirming that the requested transaction was completed.",
+                evidence=unconfirmed_transaction_evidence,
+            )
+        )
     return candidate
 
 

@@ -57,12 +57,48 @@ def test_resolved_call_rejects_contradictory_negative_attention_signals() -> Non
         attention_contributions=[
             ScoreCandidate(signal="issue_unresolved", points=25, explanation="Issue was resolved.", evidence=EvidencePointer(segment_id=1, quote=answer.text)),
             ScoreCandidate(signal="agent_unable_to_answer", points=15, explanation="Agent answered correctly.", evidence=EvidencePointer(segment_id=1, quote=answer.text)),
+            ScoreCandidate(signal="transaction_completion_unconfirmed", points=40, explanation="Transaction was not confirmed.", evidence=EvidencePointer(segment_id=1, quote=answer.text)),
         ],
     )
 
     validated = validate_candidate_evidence(candidate, {answer.id: answer}, RuleAnalysisEngine())
 
     assert validated.attention_contributions == []
+
+
+def test_unresolved_unanswered_combination_is_critical() -> None:
+    score = ATTENTION_WEIGHTS["issue_unresolved"] + ATTENTION_WEIGHTS["agent_unable_to_answer"]
+    assert score == 70
+
+
+def test_generic_call_closing_does_not_prove_resolution() -> None:
+    agent_close = segment(1, "agent", "Is there anything else I can help you with?")
+    closing = segment(2, "customer", "No, that will be it.", 5_000)
+    unrelated_later_close = segment(3, "agent", "Is there anything else regarding your account?", 8_000)
+    candidate = AnalysisCandidate(
+        intent_category="payment",
+        resolution_status="RESOLVED",
+        resolution_evidence=EvidencePointer(segment_id=closing.id, quote=closing.text),
+        attention_contributions=[
+            ScoreCandidate(
+                signal="issue_unresolved",
+                points=40,
+                explanation="The issue was resolved, customer confirmed no further help needed.",
+                evidence=EvidencePointer(segment_id=closing.id, quote=closing.text),
+            )
+        ],
+    )
+
+    validated = validate_candidate_evidence(
+        candidate,
+        {agent_close.id: agent_close, closing.id: closing, unrelated_later_close.id: unrelated_later_close},
+        RuleAnalysisEngine(),
+    )
+
+    assert validated.resolution_status == "UNKNOWN"
+    assert validated.resolution_evidence is None
+    assert [(item.signal, item.points) for item in validated.attention_contributions] == [("transaction_completion_unconfirmed", 40)]
+    assert validated.attention_contributions[0].evidence.segment_id == agent_close.id
 
 
 def test_generated_summary_is_narrative_and_mentions_validated_issues() -> None:
