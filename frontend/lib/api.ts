@@ -58,6 +58,14 @@ class ApiError extends Error {
   }
 }
 
+export type NewFilesJob = {
+  status: "IDLE" | "RUNNING" | "COMPLETE" | "FAILED";
+  discovered: number;
+  processed: number;
+  failed: number;
+  error?: string | null;
+};
+
 async function fetchJson<T>(path: string): Promise<T> {
   const apiAccessToken = typeof window === "undefined" ? process.env.API_ACCESS_TOKEN : undefined;
   const response = await fetch(prefixedUrl(path), {
@@ -67,6 +75,21 @@ async function fetchJson<T>(path: string): Promise<T> {
   if (!response.ok) throw new ApiError(response.status, `${response.status} ${response.statusText}`);
   return (await response.json()) as T;
 }
+
+async function postJson<T>(path: string): Promise<T> {
+  const response = await fetch(prefixedUrl(path), {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new ApiError(response.status, string(record(payload).detail) || `${response.status} ${response.statusText}`);
+  }
+  return (await response.json()) as T;
+}
+
+export const processingNewFilesStatus = () => fetchJson<NewFilesJob>("/api/v1/processing/new-files");
+export const processNewFiles = () => postJson<NewFilesJob>("/api/v1/processing/new-files");
 
 async function versioned<T>(path: string, legacyPath?: string): Promise<T> {
   try {

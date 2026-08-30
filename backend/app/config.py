@@ -7,6 +7,7 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./callradar.db"
     media_root: Path = Path("./data")
+    dataset_root: Path = Path("./data/callradar-data")
     cors_origins: str = "http://localhost:3000"
     # Optional for local development; required for a deployment that exposes the API.
     # The Next.js server uses this value server-side only, never through NEXT_PUBLIC_*.

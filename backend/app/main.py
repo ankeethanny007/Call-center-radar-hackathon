@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Lock, Thread
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
@@ -14,8 +15,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
 from .config import settings
-from .database import db_session, engine
+from .database import SessionLocal, db_session, engine
 from .models import Agent, AttentionContribution, Call, Customer, Evidence, MoodEvent, Topic
+from .pipeline import ingest_dataset, process_batch
 from .security import require_api_access, require_media_access
 from .storage import storage
 
@@ -28,6 +30,21 @@ app.add_middleware(
 )
 settings.media_root.mkdir(parents=True, exist_ok=True)
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_api_access)])
+new_files_lock = Lock()
+new_files_job: dict[str, Any] = {"status": "IDLE", "discovered": 0, "processed": 0, "failed": 0, "error": None}
+
+
+def process_new_call_ids(call_ids: list[str]) -> None:
+    db = SessionLocal()
+    try:
+        result = process_batch(db, settings.media_root, call_ids=call_ids)
+        with new_files_lock:
+            new_files_job.update(status="COMPLETE", **result)
+    except Exception as exc:
+        with new_files_lock:
+            new_files_job.update(status="FAILED", error=str(exc)[:1000])
+    finally:
+        db.close()
 
 
 def iso(value: datetime | None) -> str | None:
@@ -379,6 +396,38 @@ def processing_progress(db: Session = Depends(db_session)) -> dict[str, Any]:
     counts = Counter(status for (status,) in db.query(Call.processing_status).all())
     total, ready = sum(counts.values()), counts.get("READY", 0)
     return {"total": total, "ready": ready, "percent_ready": round((ready / total) * 100, 1) if total else 0, "by_status": dict(sorted(counts.items()))}
+
+
+@router.get("/processing/new-files")
+def new_files_status() -> dict[str, Any]:
+    with new_files_lock:
+        return dict(new_files_job)
+
+
+@router.post("/processing/new-files", status_code=202)
+def process_new_files(db: Session = Depends(db_session)) -> dict[str, Any]:
+    """Ingest matched files not already persisted and process only those calls."""
+    with new_files_lock:
+        if new_files_job["status"] == "RUNNING":
+            raise HTTPException(status_code=409, detail="A new-files processing job is already running")
+
+    existing_ids = {call_id for (call_id,) in db.query(Call.id).all()}
+    ingestion = ingest_dataset(db, settings.dataset_root, settings.media_root)
+    new_ids = [call_id for (call_id,) in db.query(Call.id).filter(~Call.id.in_(existing_ids)).all()]
+
+    with new_files_lock:
+        new_files_job.update(
+            status="RUNNING" if new_ids else "COMPLETE",
+            discovered=len(new_ids),
+            processed=0,
+            failed=0,
+            error=None,
+            ingestion=ingestion,
+        )
+        response = dict(new_files_job)
+    if new_ids:
+        Thread(target=process_new_call_ids, args=(new_ids,), daemon=True, name="callradar-new-files").start()
+    return response
 
 
 app.include_router(router)
