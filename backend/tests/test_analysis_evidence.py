@@ -65,6 +65,11 @@ def test_resolved_call_rejects_contradictory_negative_attention_signals() -> Non
     assert validated.attention_contributions == []
 
 
+def test_unresolved_unanswered_combination_is_critical() -> None:
+    score = ATTENTION_WEIGHTS["issue_unresolved"] + ATTENTION_WEIGHTS["agent_unable_to_answer"]
+    assert score == 70
+
+
 def test_generated_summary_is_narrative_and_mentions_validated_issues() -> None:
     request = segment(1, "customer", "I need to check my account balance.")
     laughter = segment(2, "agent", "[laughter]", 5_000)

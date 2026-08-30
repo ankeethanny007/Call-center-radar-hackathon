@@ -495,6 +495,24 @@ def regenerate_summaries(db: Session, call_ids: Iterable[str] | None = None) -> 
     return refreshed
 
 
+def recalculate_attention_scores(db: Session, call_ids: Iterable[str] | None = None) -> int:
+    """Apply current fixed weights to persisted, evidence-backed contributions."""
+    query = db.query(Call).filter(Call.analysis.has())
+    if call_ids is not None:
+        query = query.filter(Call.id.in_(list(call_ids)))
+    recalculated = 0
+    for call in query.all():
+        total = 0
+        for contribution in call.attention_contributions:
+            contribution.points = ATTENTION_WEIGHTS.get(contribution.signal, 0)
+            total += contribution.points
+        call.analysis.attention_score = min(100, total)
+        call.analysis.attention_band = attention_band(call.analysis.attention_score)
+        recalculated += 1
+    db.commit()
+    return recalculated
+
+
 def process_call(db: Session, call: Call, media_root: Path) -> None:
     """Process exactly one call. Completed calls are never recomputed by the API."""
     call_id = call.id
