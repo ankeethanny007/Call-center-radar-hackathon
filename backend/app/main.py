@@ -2,26 +2,85 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock, Thread
+from time import monotonic
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
-from sqlalchemy import text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .config import settings
 from .database import SessionLocal, db_session, engine
-from .models import Agent, AttentionContribution, Call, Customer, Evidence, MoodEvent, Topic
+from .models import Agent, AttentionContribution, Call, CallAnalysis, Customer, Evidence, MoodEvent, Topic
 from .pipeline import ingest_dataset, process_batch
 from .security import require_api_access, require_media_access
 from .storage import storage
 
-app = FastAPI(title="Call-Centre Radar API", version="1.0.0", description="Persistent, evidence-first call-centre intelligence.")
+new_files_lock = Lock()
+new_files_job: dict[str, Any] = {"status": "IDLE", "discovered": 0, "processed": 0, "failed": 0, "error": None}
+read_cache_lock = Lock()
+read_cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
+
+
+def cached_read(key: tuple[Any, ...]) -> Any | None:
+    with read_cache_lock:
+        cached = read_cache.get(key)
+        if cached and cached[0] > monotonic():
+            return cached[1]
+        read_cache.pop(key, None)
+    return None
+
+
+def cache_read(key: tuple[Any, ...], value: Any, seconds: float = 30.0) -> Any:
+    with read_cache_lock:
+        read_cache[key] = (monotonic() + seconds, value)
+    return value
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Pay the remote connection cost before the first interactive request."""
+    with read_cache_lock:
+        read_cache.clear()
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        # The health endpoint remains the authoritative readiness signal.
+        pass
+    def prewarm(task: str) -> None:
+        db = SessionLocal()
+        try:
+            if task.startswith("calls-"):
+                calls(
+                    customer_id=None, agent_id=None, intent=None, resolution=None, minimum_attention_score=None,
+                    mood=None, started_after=None, started_before=None, minimum_duration_seconds=None,
+                    maximum_duration_seconds=None, status=None, search=None, limit=500,
+                    offset=int(task.removeprefix("calls-")), db=db,
+                )
+            elif task == "attention": attention(limit=100, db=db)
+            elif task == "customers": customers(search=None, db=db)
+            elif task == "trends": trends(days=7, db=db)
+            elif task == "agents": agents(db=db)
+        finally:
+            db.close()
+    try:
+        with ThreadPoolExecutor(max_workers=7) as pool:
+            list(pool.map(prewarm, ("calls-0", "calls-500", "calls-1000", "attention", "customers", "trends", "agents")))
+    except SQLAlchemyError:
+        pass
+    yield
+
+
+app = FastAPI(title="Call-Centre Radar API", version="1.0.0", description="Persistent, evidence-first call-centre intelligence.", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[value.strip() for value in settings.cors_origins.split(",")],
@@ -30,8 +89,6 @@ app.add_middleware(
 )
 settings.media_root.mkdir(parents=True, exist_ok=True)
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_api_access)])
-new_files_lock = Lock()
-new_files_job: dict[str, Any] = {"status": "IDLE", "discovered": 0, "processed": 0, "failed": 0, "error": None}
 
 
 def process_new_call_ids(call_ids: list[str]) -> None:
@@ -192,9 +249,9 @@ def detail_payload(call: Call) -> dict[str, Any]:
 
 def call_query(db: Session):
     return db.query(Call).options(
-        joinedload(Call.customer), joinedload(Call.agent), joinedload(Call.analysis), joinedload(Call.transcript_segments),
-        joinedload(Call.evidence_items), joinedload(Call.mood_events), joinedload(Call.topics),
-        joinedload(Call.attention_contributions).joinedload(AttentionContribution.evidence),
+        joinedload(Call.customer), joinedload(Call.agent), joinedload(Call.analysis), selectinload(Call.transcript_segments),
+        selectinload(Call.evidence_items), selectinload(Call.mood_events), selectinload(Call.topics),
+        selectinload(Call.attention_contributions).joinedload(AttentionContribution.evidence),
     )
 
 
@@ -204,8 +261,52 @@ def call_list_query(db: Session):
         joinedload(Call.customer),
         joinedload(Call.agent),
         joinedload(Call.analysis),
-        joinedload(Call.mood_events),
+        selectinload(Call.mood_events),
     ).order_by(Call.started_at.desc())
+
+
+def call_summary_query(db: Session):
+    """Project archive fields directly; never hydrate transcripts or relationship collections."""
+    dominant_mood = (
+        select(MoodEvent.mood)
+        .where(MoodEvent.call_id == Call.id)
+        .group_by(MoodEvent.mood)
+        .order_by(func.count(MoodEvent.id).desc(), MoodEvent.mood)
+        .limit(1)
+        .correlate(Call)
+        .scalar_subquery()
+    )
+    return db.query(
+        Call.id.label("id"),
+        Call.processing_status.label("processing_status"),
+        Call.started_at.label("started_at"),
+        Call.duration_seconds.label("duration_seconds"),
+        Customer.id.label("customer_id"),
+        Customer.name.label("customer_name"),
+        Agent.id.label("agent_id"),
+        Agent.name.label("agent_name"),
+        CallAnalysis.intent_category.label("intent_category"),
+        CallAnalysis.resolution_status.label("resolution_status"),
+        CallAnalysis.attention_score.label("attention_score"),
+        CallAnalysis.attention_band.label("attention_band"),
+        dominant_mood.label("mood_label"),
+    ).outerjoin(Call.customer).outerjoin(Call.agent).outerjoin(Call.analysis)
+
+
+def projected_call_summary(row: Any) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "processing_status": row.processing_status,
+        "started_at": iso(row.started_at),
+        "duration_seconds": row.duration_seconds,
+        "customer": {"id": row.customer_id, "name": row.customer_name} if row.customer_id else None,
+        "agent": {"id": row.agent_id, "name": row.agent_name} if row.agent_id else None,
+        "intent_category": row.intent_category,
+        "resolution_status": row.resolution_status,
+        "mood_label": row.mood_label,
+        "attention_score": row.attention_score,
+        "attention_band": row.attention_band,
+    }
 
 
 @app.get("/health")
@@ -235,34 +336,38 @@ def calls(
         started_after = started_after.astimezone(UTC).replace(tzinfo=None)
     if started_before and started_before.tzinfo:
         started_before = started_before.astimezone(UTC).replace(tzinfo=None)
-    query = call_list_query(db)
+    cache_key = ("calls", customer_id, agent_id, intent, resolution, minimum_attention_score, mood, started_after, started_before, minimum_duration_seconds, maximum_duration_seconds, status, search, limit, offset)
+    cached = cached_read(cache_key)
+    if cached is not None:
+        return cached
+    query = call_summary_query(db).order_by(Call.started_at.desc())
     if customer_id: query = query.filter(Call.customer_id == customer_id)
     if agent_id: query = query.filter(Call.agent_id == agent_id)
     if status: query = query.filter(Call.processing_status == status)
-    rows = query.all()
-    filtered = []
-    needle = search.lower() if search else None
-    for row in rows:
-        analysis = row.analysis
-        if intent and (not analysis or analysis.intent_category != intent): continue
-        if resolution and (not analysis or analysis.resolution_status != resolution): continue
-        if minimum_attention_score is not None and (not analysis or analysis.attention_score < minimum_attention_score): continue
-        if mood and not any(event.mood == mood for event in row.mood_events): continue
-        if started_after and (not row.started_at or row.started_at < started_after): continue
-        if started_before and (not row.started_at or row.started_at > started_before): continue
-        if minimum_duration_seconds is not None and (row.duration_seconds is None or row.duration_seconds < minimum_duration_seconds): continue
-        if maximum_duration_seconds is not None and (row.duration_seconds is None or row.duration_seconds > maximum_duration_seconds): continue
-        if needle and needle not in " ".join(filter(None, [row.id, row.customer.name if row.customer else None, row.agent.name if row.agent else None])).lower(): continue
-        filtered.append(call_summary(row))
-    return filtered[offset:offset + limit]
+    if intent: query = query.filter(CallAnalysis.intent_category == intent)
+    if resolution: query = query.filter(CallAnalysis.resolution_status == resolution)
+    if minimum_attention_score is not None: query = query.filter(CallAnalysis.attention_score >= minimum_attention_score)
+    if mood: query = query.filter(Call.mood_events.any(MoodEvent.mood == mood))
+    if started_after: query = query.filter(Call.started_at >= started_after)
+    if started_before: query = query.filter(Call.started_at <= started_before)
+    if minimum_duration_seconds is not None: query = query.filter(Call.duration_seconds >= minimum_duration_seconds)
+    if maximum_duration_seconds is not None: query = query.filter(Call.duration_seconds <= maximum_duration_seconds)
+    if search:
+        pattern = f"%{search.strip()}%"
+        query = query.filter(or_(Call.id.ilike(pattern), Customer.name.ilike(pattern), Agent.name.ilike(pattern)))
+    return cache_read(cache_key, [projected_call_summary(row) for row in query.offset(offset).limit(limit).all()])
 
 
 @router.get("/calls/{call_id}")
 def call_detail(call_id: str, db: Session = Depends(db_session)) -> dict[str, Any]:
+    cache_key = ("call-detail", call_id)
+    cached = cached_read(cache_key)
+    if cached is not None:
+        return cached
     call = call_query(db).filter(Call.id == call_id).first()
     if call is None:
         raise HTTPException(status_code=404, detail="Call not found")
-    return detail_payload(call)
+    return cache_read(cache_key, detail_payload(call))
 
 
 @router.get("/calls/{call_id}/audio")
@@ -275,15 +380,23 @@ def call_audio(call_id: str, db: Session = Depends(db_session)) -> RedirectRespo
 
 @router.get("/attention")
 def attention(limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(db_session)) -> list[dict[str, Any]]:
-    rows = [call_summary(call) for call in call_list_query(db).all() if call.analysis and call.analysis.attention_score > 0]
-    return sorted(rows, key=lambda item: item["attention_score"] or 0, reverse=True)[:limit]
+    cache_key = ("attention", limit)
+    cached = cached_read(cache_key)
+    if cached is not None:
+        return cached
+    rows = call_summary_query(db).filter(CallAnalysis.attention_score > 0).order_by(CallAnalysis.attention_score.desc()).limit(limit).all()
+    return cache_read(cache_key, [projected_call_summary(row) for row in rows])
 
 
 @router.get("/customers")
 def customers(search: str | None = None, db: Session = Depends(db_session)) -> list[dict[str, Any]]:
+    cache_key = ("customers", search)
+    cached = cached_read(cache_key)
+    if cached is not None:
+        return cached
     rows = db.query(Customer).options(
-        joinedload(Customer.calls).joinedload(Call.analysis),
-        joinedload(Customer.calls).joinedload(Call.mood_events),
+        selectinload(Customer.calls).joinedload(Call.analysis),
+        selectinload(Customer.calls).selectinload(Call.mood_events),
     ).all()
     needle = search.lower() if search else None
     result = []
@@ -298,7 +411,7 @@ def customers(search: str | None = None, db: Session = Depends(db_session)) -> l
             "average_mood": dominant_mood(calls),
             "last_contact": iso(max((call.started_at for call in calls if call.started_at), default=None)),
         })
-    return sorted(result, key=lambda item: item["name"] or item["id"])
+    return cache_read(cache_key, sorted(result, key=lambda item: item["name"] or item["id"]))
 
 
 @router.get("/customers/{customer_id}")
@@ -328,6 +441,10 @@ def customer_calls(customer_id: str, db: Session = Depends(db_session)) -> list[
 
 @router.get("/trends")
 def trends(days: int = Query(default=7, ge=1, le=365), db: Session = Depends(db_session)) -> dict[str, Any]:
+    cache_key = ("trends", days)
+    cached = cached_read(cache_key)
+    if cached is not None:
+        return cached
     ready = [call for call in call_list_query(db).all() if call.analysis and call.analysis.intent_category]
     latest = max((call.started_at for call in ready if call.started_at), default=None)
     if latest:
@@ -342,23 +459,27 @@ def trends(days: int = Query(default=7, ge=1, le=365), db: Session = Depends(db_
     previous_resolutions = Counter(call.analysis.resolution_status for call in previous if call.analysis.resolution_status != "UNKNOWN")
     current_moods = Counter(event.mood for call in current for event in call.mood_events)
     previous_moods = Counter(event.mood for call in previous for event in call.mood_events)
-    return {
+    return cache_read(cache_key, {
         "period_days": days,
         "reference_end": iso(latest),
         "issues": trend_items(current_intents, previous_intents),
         "resolutions": trend_items(current_resolutions, previous_resolutions),
         "moods": trend_items(current_moods, previous_moods),
         "processed_calls": len(ready),
-    }
+    })
 
 
 @router.get("/agents")
 def agents(db: Session = Depends(db_session)) -> list[dict[str, Any]]:
+    cache_key = ("agents",)
+    cached = cached_read(cache_key)
+    if cached is not None:
+        return cached
     rows = db.query(Agent).options(
-        joinedload(Agent.calls).joinedload(Call.analysis),
-        joinedload(Agent.calls).joinedload(Call.topics),
-        joinedload(Agent.calls).joinedload(Call.mood_events),
-        joinedload(Agent.calls).joinedload(Call.attention_contributions),
+        selectinload(Agent.calls).joinedload(Call.analysis),
+        selectinload(Agent.calls).selectinload(Call.topics),
+        selectinload(Agent.calls).selectinload(Call.mood_events),
+        selectinload(Agent.calls).selectinload(Call.attention_contributions),
     ).all()
     result = []
     for agent in rows:
@@ -377,7 +498,7 @@ def agents(db: Session = Depends(db_session)) -> list[dict[str, Any]]:
             "average_attention_score": round(sum(call.analysis.attention_score for call in analyzed) / len(analyzed), 1) if analyzed else None,
             "review_call_count": sum(1 for call in analyzed if call.analysis.attention_score >= 50),
         })
-    return sorted(result, key=lambda item: item["name"] or item["id"])
+    return cache_read(cache_key, sorted(result, key=lambda item: item["name"] or item["id"]))
 
 
 @router.get("/agents/{agent_id}")
