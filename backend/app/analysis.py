@@ -35,12 +35,12 @@ MOOD_SCORES = {
 RESOLUTIONS = ("RESOLVED", "PARTIALLY_RESOLVED", "UNRESOLVED", "UNKNOWN")
 ATTENTION_WEIGHTS = {
     "highly_negative_customer": 25,
-    "issue_unresolved": 25,
+    "issue_unresolved": 40,
     "escalation_requested": 15,
     "persistent_negative_mood": 15,
     "repeated_question": 10,
     "repeat_caller": 10,
-    "agent_unable_to_answer": 15,
+    "agent_unable_to_answer": 30,
     "serious_complaint": 20,
     "abnormal_handle_time": 10,
     "transaction_amount_requested": 35,
@@ -330,7 +330,7 @@ class RuleAnalysisEngine:
         if negative:
             candidate.attention_contributions.append(ScoreCandidate(signal="highly_negative_customer", points=25, explanation="Customer expressed strong negative sentiment.", evidence=pointer(negative)))
         if unresolved:
-            candidate.attention_contributions.append(ScoreCandidate(signal="issue_unresolved", points=25, explanation="Customer explicitly indicated the issue remained unresolved.", evidence=pointer(unresolved)))
+            candidate.attention_contributions.append(ScoreCandidate(signal="issue_unresolved", points=ATTENTION_WEIGHTS["issue_unresolved"], explanation="Customer explicitly indicated the issue remained unresolved.", evidence=pointer(unresolved)))
         if escalation:
             candidate.attention_contributions.append(ScoreCandidate(signal="escalation_requested", points=15, explanation="Customer requested escalation or a manager.", evidence=pointer(escalation)))
         if repeat_question:
@@ -338,7 +338,7 @@ class RuleAnalysisEngine:
         if repeat_caller:
             candidate.attention_contributions.append(ScoreCandidate(signal="repeat_caller", points=10, explanation="Customer explicitly said this was a repeat contact.", evidence=pointer(repeat_caller)))
         if unable and candidate.resolution_status != "RESOLVED":
-            candidate.attention_contributions.append(ScoreCandidate(signal="agent_unable_to_answer", points=15, explanation="Agent indicated they could not provide an answer.", evidence=pointer(unable)))
+            candidate.attention_contributions.append(ScoreCandidate(signal="agent_unable_to_answer", points=ATTENTION_WEIGHTS["agent_unable_to_answer"], explanation="Agent indicated they could not provide an answer.", evidence=pointer(unable)))
         if negative and escalation:
             candidate.attention_contributions.append(ScoreCandidate(signal="serious_complaint", points=20, explanation="Customer made a serious complaint or escalation request.", evidence=pointer(escalation)))
         if persistent_negative:
@@ -380,7 +380,7 @@ Every non-null field must cite an existing transcript segment and an exact quote
 Use only this issue taxonomy: billing, fraud, card, account, login, payment, refund, cash_withdrawal, transfer, fees, complaint, general_inquiry, other.
 Use only RESOLVED, PARTIALLY_RESOLVED, UNRESOLVED, UNKNOWN for resolution.
 Use only positive, neutral, confused, concerned, frustrated, angry, distressed, satisfied for moods.
-Do not infer missing facts. Keep summary to 40 words maximum. Use only these attention signal names with their fixed weights: highly_negative_customer (25), issue_unresolved (25), escalation_requested (15), persistent_negative_mood (15), repeated_question (10), repeat_caller (10), agent_unable_to_answer (15), serious_complaint (20), abnormal_handle_time (10). A repeat_caller signal requires the customer to explicitly say this is a repeat contact. An abnormal_handle_time signal requires the customer to explicitly report a prolonged wait or handling time; never infer either signal from metadata. Every contribution needs a directly supporting citation."""
+Do not infer missing facts. Keep summary to 40 words maximum. Use only these attention signal names with their fixed weights: highly_negative_customer (25), issue_unresolved (40), escalation_requested (15), persistent_negative_mood (15), repeated_question (10), repeat_caller (10), agent_unable_to_answer (30), serious_complaint (20), abnormal_handle_time (10). A repeat_caller signal requires the customer to explicitly say this is a repeat contact. An abnormal_handle_time signal requires the customer to explicitly report a prolonged wait or handling time; never infer either signal from metadata. Every contribution needs a directly supporting citation."""
         payload = f"TRANSCRIPT:\n{transcript}"
         response = self.client.responses.create(
             model=settings.openai_model,
