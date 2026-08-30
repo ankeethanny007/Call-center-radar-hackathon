@@ -148,6 +148,69 @@ def word_limited(text: str, max_words: int = 40) -> str:
     return " ".join(text.split()[:max_words])
 
 
+SUMMARY_INTENTS = {
+    "account": "check their account balance",
+    "transfer": "transfer money between accounts",
+    "payment": "make or discuss a payment",
+    "billing": "discuss a billing concern",
+    "fraud": "report a potentially fraudulent transaction",
+    "card": "get help with a bank card",
+    "login": "get help accessing their account",
+    "refund": "request or discuss a refund",
+    "cash_withdrawal": "discuss a cash withdrawal",
+    "fees": "discuss account fees",
+    "complaint": "raise a service complaint",
+    "general_inquiry": "make a general banking enquiry",
+    "other": "request banking assistance",
+}
+
+SUMMARY_ISSUES = {
+    "transaction_amount_mismatch": "a transaction amount mismatch",
+    "unprofessional_agent_conduct": "inappropriate agent conduct",
+    "highly_negative_customer": "strong customer dissatisfaction",
+    "issue_unresolved": "an unresolved request",
+    "escalation_requested": "a customer escalation request",
+    "persistent_negative_mood": "persistent negative customer sentiment",
+    "repeated_question": "repeated customer information",
+    "repeat_caller": "repeat customer contact",
+    "agent_unable_to_answer": "an unanswered customer request",
+    "serious_complaint": "a serious customer complaint",
+    "abnormal_handle_time": "a reported excessive wait",
+}
+
+
+def generated_summary(candidate: AnalysisCandidate, agent_name: str | None = None) -> tuple[str | None, EvidencePointer | None]:
+    """Build a concise narrative only from findings that survived evidence validation."""
+    source = candidate.intent_evidence or candidate.resolution_evidence or candidate.summary_evidence
+    if source is None:
+        source = next((item.evidence for item in candidate.attention_contributions if item.evidence), None)
+    if source is None:
+        return None, None
+
+    purpose = SUMMARY_INTENTS.get(candidate.intent_category or "", "request banking assistance")
+    summary = f"Customer called to {purpose}."
+    agent = agent_name.strip() if agent_name and agent_name.strip() else "The agent"
+    issues = list(dict.fromkeys(
+        SUMMARY_ISSUES[item.signal]
+        for item in candidate.attention_contributions
+        if item.signal in SUMMARY_ISSUES
+    ))
+
+    if candidate.resolution_status == "RESOLVED":
+        summary += f" {agent} resolved the request"
+        summary += "." if issues else " without any issues."
+    elif candidate.resolution_status == "PARTIALLY_RESOLVED":
+        summary += f" {agent} partially resolved the request."
+    elif candidate.resolution_status == "UNRESOLVED":
+        summary += f" {agent} did not resolve the request."
+    else:
+        summary += " The outcome was not confirmed."
+
+    if issues:
+        summary += f" Manager review is recommended because of {', '.join(issues[:2])}."
+    return word_limited(summary), source
+
+
 def first_match(segments: Iterable[TranscriptSegment], terms: tuple[str, ...]) -> TranscriptSegment | None:
     return next((segment for segment in segments if any(term in normalize(segment.text) for term in terms)), None)
 

@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
 
-from .analysis import ATTENTION_WEIGHTS, AnalysisCandidate, EvidencePointer, RuleAnalysisEngine, attention_band, get_analysis_engine, pointer_is_valid, validate_candidate_evidence
+from .analysis import ATTENTION_WEIGHTS, AnalysisCandidate, EvidencePointer, RuleAnalysisEngine, ScoreCandidate, attention_band, generated_summary, get_analysis_engine, pointer_is_valid, validate_candidate_evidence
 from .config import settings
 from .models import (
     Agent,
@@ -424,6 +424,77 @@ def persist_analysis(db: Session, call: Call, candidate: AnalysisCandidate, mode
         db.add(Topic(call_id=call.id, topic=candidate.intent_category, confidence=candidate.intent_confidence))
 
 
+def regenerate_summaries(db: Session, call_ids: Iterable[str] | None = None) -> int:
+    """Refresh narrative summaries without recomputing any other persisted analysis."""
+    query = db.query(Call).filter(
+        Call.analysis.has(),
+        ~Call.processing_status.in_(("TRANSCRIBING", "ANALYZING")),
+    )
+    if call_ids is not None:
+        selected_ids = list(call_ids)
+        if not selected_ids:
+            return 0
+        query = query.filter(Call.id.in_(selected_ids))
+
+    refreshed = 0
+    for call in query.order_by(Call.created_at).all():
+        evidence_by_type: dict[str, Evidence] = {}
+        evidence_by_id = {item.id: item for item in call.evidence_items}
+        for item in sorted(call.evidence_items, key=lambda value: value.start_ms):
+            evidence_by_type.setdefault(item.analysis_type, item)
+
+        def evidence_pointer(item: Evidence | None) -> EvidencePointer | None:
+            return EvidencePointer(segment_id=item.transcript_segment_id, quote=item.quote) if item else None
+
+        analysis = call.analysis
+        candidate = AnalysisCandidate(
+            intent_category=analysis.intent_category,
+            intent_description=analysis.intent_description,
+            intent_confidence=analysis.intent_confidence or 0,
+            intent_evidence=evidence_pointer(evidence_by_type.get("intent")),
+            resolution_status=analysis.resolution_status,
+            resolution_evidence=evidence_pointer(evidence_by_type.get("resolution")),
+            summary_evidence=evidence_pointer(evidence_by_type.get("summary")),
+            attention_contributions=[
+                ScoreCandidate(
+                    signal=item.signal,
+                    points=item.points,
+                    explanation=item.explanation,
+                    evidence=evidence_pointer(evidence_by_id.get(item.evidence_id)),
+                )
+                for item in call.attention_contributions
+                if evidence_by_id.get(item.evidence_id)
+            ],
+        )
+        if not (candidate.intent_evidence or candidate.resolution_evidence or candidate.summary_evidence):
+            fallback_segment = next(
+                (item for item in call.transcript_segments if item.speaker == "customer"),
+                next(iter(call.transcript_segments), None),
+            )
+            if fallback_segment:
+                candidate.summary_evidence = EvidencePointer(
+                    segment_id=fallback_segment.id,
+                    quote=fallback_segment.text,
+                )
+        summary, citation = generated_summary(candidate, call.agent.name if call.agent else None)
+        db.query(Evidence).filter_by(call_id=call.id, analysis_type="summary").delete(synchronize_session=False)
+        db.flush()
+        saved_evidence = create_evidence(
+            db,
+            call,
+            {segment.id: segment for segment in call.transcript_segments},
+            "summary",
+            summary or "",
+            citation,
+        )
+        analysis.summary = summary if saved_evidence else None
+        refreshed += 1
+        if refreshed % 100 == 0:
+            db.commit()
+    db.commit()
+    return refreshed
+
+
 def process_call(db: Session, call: Call, media_root: Path) -> None:
     """Process exactly one call. Completed calls are never recomputed by the API."""
     call_id = call.id
@@ -485,6 +556,10 @@ def process_call(db: Session, call: Call, media_root: Path) -> None:
             engine = RuleAnalysisEngine()
             candidate = engine.analyse(transcript)
         candidate = validate_candidate_evidence(candidate, {segment.id: segment for segment in transcript}, engine)
+        candidate.summary, candidate.summary_evidence = generated_summary(
+            candidate,
+            call.agent.name if call.agent else None,
+        )
         persist_analysis(db, call, candidate, settings.openai_model if engine.__class__.__name__ == "OpenAIAnalysisEngine" else "rules")
         call.processing_status = "ANALYZED"
         db.commit()

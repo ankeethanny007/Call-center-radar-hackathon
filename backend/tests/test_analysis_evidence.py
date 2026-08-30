@@ -1,4 +1,4 @@
-from app.analysis import ATTENTION_WEIGHTS, MOOD_SCORES, AnalysisCandidate, EvidencePointer, MoodCandidate, RuleAnalysisEngine, ScoreCandidate, validate_candidate_evidence
+from app.analysis import ATTENTION_WEIGHTS, MOOD_SCORES, AnalysisCandidate, EvidencePointer, MoodCandidate, RuleAnalysisEngine, ScoreCandidate, generated_summary, validate_candidate_evidence
 from app.pipeline import metadata_record, validate_metadata_shape
 from app.models import TranscriptSegment
 
@@ -63,6 +63,54 @@ def test_resolved_call_rejects_contradictory_negative_attention_signals() -> Non
     validated = validate_candidate_evidence(candidate, {answer.id: answer}, RuleAnalysisEngine())
 
     assert validated.attention_contributions == []
+
+
+def test_generated_summary_is_narrative_and_mentions_validated_issues() -> None:
+    request = segment(1, "customer", "I need to check my account balance.")
+    laughter = segment(2, "agent", "[laughter]", 5_000)
+    candidate = AnalysisCandidate(
+        intent_category="account",
+        intent_description=request.text,
+        intent_evidence=EvidencePointer(segment_id=1, quote=request.text),
+        resolution_status="RESOLVED",
+        resolution_evidence=EvidencePointer(segment_id=1, quote=request.text),
+        attention_contributions=[
+            ScoreCandidate(
+                signal="unprofessional_agent_conduct",
+                points=35,
+                explanation="Agent laughed at the end of the interaction.",
+                evidence=EvidencePointer(segment_id=2, quote=laughter.text),
+            )
+        ],
+    )
+
+    summary, evidence = generated_summary(candidate, "Patricia")
+
+    assert summary == (
+        "Customer called to check their account balance. Patricia resolved the request. "
+        "Manager review is recommended because of inappropriate agent conduct."
+    )
+    assert summary not in {request.text, laughter.text}
+    assert len(summary.split()) <= 40
+    assert evidence == candidate.intent_evidence
+
+
+def test_generated_summary_says_when_resolved_without_issues() -> None:
+    request = segment(1, "customer", "I need to check my account balance.")
+    candidate = AnalysisCandidate(
+        intent_category="account",
+        intent_description=request.text,
+        intent_evidence=EvidencePointer(segment_id=1, quote=request.text),
+        resolution_status="RESOLVED",
+        resolution_evidence=EvidencePointer(segment_id=1, quote=request.text),
+    )
+
+    summary, _evidence = generated_summary(candidate, "Patricia")
+
+    assert summary == (
+        "Customer called to check their account balance. "
+        "Patricia resolved the request without any issues."
+    )
 
 
 def test_repeat_contact_and_wait_signals_require_customer_words() -> None:
