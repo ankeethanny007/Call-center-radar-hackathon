@@ -411,6 +411,31 @@ def validate_candidate_evidence(
     candidate: AnalysisCandidate, segments: dict[int, TranscriptSegment], engine: RuleAnalysisEngine | OpenAIAnalysisEngine
 ) -> AnalysisCandidate:
     """Reject unsupported claims before persistence; no valid citation means no returned claim."""
+    if candidate.resolution_status == "RESOLVED" and candidate.resolution_evidence:
+        resolution_quote = normalize(candidate.resolution_evidence.quote).rstrip(".!?")
+        generic_closings = (
+            "no, that will be it",
+            "no that will be it",
+            "no, that'll be it",
+            "no that'll be it",
+            "nothing else",
+            "thank you",
+            "thanks",
+        )
+        if any(resolution_quote == closing for closing in generic_closings):
+            # A caller ending the conversation can evidence their closing mood,
+            # but cannot prove that the requested transaction or action occurred.
+            candidate.resolution_status, candidate.resolution_evidence = "UNKNOWN", None
+
+    candidate.attention_contributions = [
+        item
+        for item in candidate.attention_contributions
+        if not (
+            item.signal in {"issue_unresolved", "agent_unable_to_answer"}
+            and any(term in normalize(item.explanation) for term in ("issue was resolved", "successfully resolved", "request was completed"))
+            and "not resolved" not in normalize(item.explanation)
+        )
+    ]
     if candidate.resolution_status == "RESOLVED":
         # These signals describe failure to answer/resolve. They are logically
         # incompatible with an evidenced resolved outcome, even if a model emits
