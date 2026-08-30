@@ -76,6 +76,47 @@ docker compose exec api python -m app.cli retry --media-root /data
 
 After initial setup, the Calls page also provides a **Process new files** button. Place new stereo MP3 files in `data/callradar-data/audio/` and their same-named metadata JSON files in `data/callradar-data/metadata/`, then use the button. The API ingests previously unseen call IDs and sends only those IDs through the persistent pipeline; existing calls are not reprocessed.
 
+## Supabase-backed handoff
+
+To rebuild the complete application on another computer without reprocessing existing calls, share two items separately:
+
+1. This GitHub repository (with the required feature branch merged or checked out).
+2. The configured root `.env` file through a secure channel. Never commit it to Git.
+
+The Supabase-backed `.env` must contain `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_BUCKET=call-audio`, and `STORAGE_PROVIDER=supabase`. `OPENAI_API_KEY` is needed only to process additional calls. Use `NEXT_PUBLIC_API_URL=http://localhost:8000`, `API_INTERNAL_URL=http://127.0.0.1:8000`, and include `http://localhost:3000` in `CORS_ORIGINS` for the standard local ports.
+
+From a fresh clone:
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r backend/requirements-dev.txt
+npm ci --prefix frontend
+
+# Put the securely shared .env in the repository root, then export it.
+set -a
+source .env
+set +a
+
+# Safe to rerun against the existing Supabase database.
+PYTHONPATH=backend .venv/bin/alembic -c backend/alembic.ini upgrade head
+
+# Build the dashboard with the browser-visible local API origin.
+npm run build --prefix frontend
+```
+
+Run the following in separate terminals after sourcing `.env` in each:
+
+```bash
+PYTHONPATH=backend .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+```bash
+npm run start --prefix frontend -- --port 3000
+```
+
+Open `http://localhost:3000`. Existing calls, transcripts, analyses, and recordings load directly from Supabase; the local SQLite file and original dataset are not required for viewing. To add calls, create `data/callradar-data/audio/` and `data/callradar-data/metadata/`, add same-named MP3/JSON pairs, and use **Process new files**.
+
 ## Native development
 
 Prerequisites: Python 3.12+, Node.js 22+, FFmpeg, and the source data. FFmpeg is installed in the API container; native development needs it on `PATH`.
