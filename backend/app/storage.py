@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+from threading import Lock
+from time import monotonic
 from urllib.parse import quote
 
 import httpx
@@ -11,6 +13,10 @@ from .security import signed_media_query
 
 
 class MediaStorage:
+    def __init__(self) -> None:
+        self._signed_urls: dict[str, tuple[float, str]] = {}
+        self._signed_urls_lock = Lock()
+
     @staticmethod
     def _object_name(relative_path: str) -> str:
         """Reject paths that could escape a local media root or storage prefix."""
@@ -35,12 +41,20 @@ class MediaStorage:
             if not settings.supabase_url or not settings.supabase_service_key:
                 raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY are required for private Supabase Storage")
             base = settings.supabase_url.rstrip("/")
+            with self._signed_urls_lock:
+                cached = self._signed_urls.get(object_name)
+                if cached and cached[0] > monotonic():
+                    return cached[1]
             endpoint = f"{base}/storage/v1/object/sign/{settings.supabase_bucket}/{quote(object_name, safe='/')}"
             headers = {"authorization": f"Bearer {settings.supabase_service_key}", "apikey": settings.supabase_service_key}
-            response = httpx.post(endpoint, headers=headers, json={"expiresIn": 3600}, timeout=15)
+            expires_in = max(60, settings.media_url_ttl_seconds)
+            response = httpx.post(endpoint, headers=headers, json={"expiresIn": expires_in}, timeout=15)
             response.raise_for_status()
             signed_path = response.json()["signedURL"]
-            return signed_path if signed_path.startswith("http") else f"{base}/storage/v1{signed_path}"
+            signed_url = signed_path if signed_path.startswith("http") else f"{base}/storage/v1{signed_path}"
+            with self._signed_urls_lock:
+                self._signed_urls[object_name] = (monotonic() + max(30, expires_in - 30), signed_url)
+            return signed_url
         return f"/media/{quote(object_name, safe='/')}{signed_media_query(object_name)}"
 
     def upload(self, relative_path: str, source: Path) -> None:
