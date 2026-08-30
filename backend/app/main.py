@@ -37,6 +37,9 @@ new_files_job: dict[str, Any] = {"status": "IDLE", "discovered": 0, "processed":
 def process_new_call_ids(call_ids: list[str]) -> None:
     db = SessionLocal()
     try:
+        calls = db.query(Call).filter(Call.id.in_(call_ids)).all()
+        for call in calls:
+            storage.upload(call.audio_path, settings.media_root / call.audio_path)
         result = process_batch(db, settings.media_root, call_ids=call_ids)
         with new_files_lock:
             new_files_job.update(status="COMPLETE", **result)
