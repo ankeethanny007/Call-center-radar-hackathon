@@ -22,6 +22,7 @@ services:
       # managed database can override COMPOSE_DATABASE_URL as one secret.
       DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-callradar}:${POSTGRES_PASSWORD:-callradar}@db:5432/${POSTGRES_DB:-callradar}}
       MEDIA_ROOT: /data
+      DATASET_ROOT: /data/callradar-data
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       API_ACCESS_TOKEN: ${API_ACCESS_TOKEN:-}
       MEDIA_URL_TTL_SECONDS: ${MEDIA_URL_TTL_SECONDS:-900}
@@ -58,6 +59,7 @@ services:
     environment:
       DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-callradar}:${POSTGRES_PASSWORD:-callradar}@db:5432/${POSTGRES_DB:-callradar}}
       MEDIA_ROOT: /data
+      DATASET_ROOT: /data/callradar-data
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
       ANALYSIS_PROVIDER: ${ANALYSIS_PROVIDER:-openai}

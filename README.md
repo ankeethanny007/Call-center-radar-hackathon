@@ -74,6 +74,8 @@ The worker exits after the current queue is empty. It is intentionally single-wo
 docker compose exec api python -m app.cli retry --media-root /data
 ```
 
+After initial setup, the Calls page also provides a **Process new files** button. Place new stereo MP3 files in `data/callradar-data/audio/` and their same-named metadata JSON files in `data/callradar-data/metadata/`, then use the button. The API ingests previously unseen call IDs and sends only those IDs through the persistent pipeline; existing calls are not reprocessed.
+
 ## Native development
 
 Prerequisites: Python 3.12+, Node.js 22+, FFmpeg, and the source data. FFmpeg is installed in the API container; native development needs it on `PATH`.
