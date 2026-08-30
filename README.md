@@ -8,7 +8,7 @@ The supplied dataset has been verified locally: 1,441 stereo, 8 kHz MP3s pair cl
 
 - Resumable states: `DISCOVERED → VALIDATED → TRANSCRIBING → TRANSCRIBED → ANALYZING → ANALYZED → READY`, plus retryable `FAILED`.
 - FFmpeg channel extraction and faster-whisper transcription for deterministic speaker attribution.
-- Persisted transcript turns, controlled intent taxonomy, resolution, ≤40-word summary, customer mood events, mood shift, topics, and a 0–100 attention score.
+- Persisted transcript turns, controlled intent taxonomy, resolution, generated ≤40-word narrative summary, customer mood events, mood shift, topics, and a 0–100 attention score.
 - Every retained intent, resolution, summary, mood event, and attention contribution has an exact quoted transcript span, timestamp, speaker, and segment ID. Unsupported claims are omitted.
 - FastAPI v1 API, PostgreSQL/Supabase-compatible persistence, local or private Supabase audio storage, and a Next.js/TypeScript dashboard.
 - Dashboard routes: Overview, Manager Attention, Customers and history, Calls and filters, Trends, Agents, and a seekable call-review screen.
@@ -135,6 +135,10 @@ PYTHONPATH=backend .venv/bin/python -m app.cli retry --media-root data
 # Re-run only persisted READY calls after intentionally changing the analysis
 # prompt/model/evidence policy; transcripts are preserved.
 PYTHONPATH=backend .venv/bin/python -m app.cli reanalyse --media-root data --limit 20
+
+# Refresh only generated narrative summaries for existing analysed calls;
+# transcripts, classifications, moods, and scores are left unchanged.
+PYTHONPATH=backend .venv/bin/python -m app.cli regenerate-summaries --media-root data
 
 # Re-transcribe and re-analyze one specific call after changing the speech model
 # or timestamp segmentation policy.

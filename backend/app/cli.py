@@ -8,7 +8,7 @@ from pathlib import Path
 from .config import settings
 from .database import SessionLocal
 from .migrations import upgrade_database
-from .pipeline import ingest_dataset, ingest_manifest, process_batch, validate_call
+from .pipeline import ingest_dataset, ingest_manifest, process_batch, regenerate_summaries, validate_call
 from .models import Call
 from .storage import storage
 
@@ -17,7 +17,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Call-Centre Radar offline processing")
     parser.add_argument(
         "command",
-        choices=("init-db", "ingest-manifest", "ingest-dataset", "validate", "process", "retry", "reanalyse", "reprocess", "sync-storage"),
+        choices=("init-db", "ingest-manifest", "ingest-dataset", "validate", "process", "retry", "reanalyse", "reprocess", "regenerate-summaries", "sync-storage"),
     )
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--dataset-root", type=Path)
@@ -78,6 +78,8 @@ def main() -> None:
             db.commit()
             result = process_batch(db, args.media_root, call_ids=call_ids)
             print(json.dumps({"queued_for_reanalysis": len(call_ids), **result}))
+        elif args.command == "regenerate-summaries":
+            print(json.dumps({"summaries_refreshed": regenerate_summaries(db, args.call_ids)}))
         elif args.command == "reprocess":
             if not args.call_ids:
                 parser.error("--call-id is required for reprocess")
