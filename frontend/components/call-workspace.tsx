@@ -113,7 +113,7 @@ function TranscriptTurnCard({ turn, active, onSeek, buttonRef }: { turn: Transcr
 
 function FindingCard({ title, finding, onEvidence, summary = false }: { title: string; finding?: Finding | null; onEvidence: (evidence: Evidence) => void; summary?: boolean }) {
   const evidence = evidenceFromFinding(finding);
-  return <article className={summary ? "finding-card summary-finding" : "finding-card"}><span>{title}</span><strong>{findingText(finding)}</strong>{finding?.description ? <p>{finding.description}</p> : null}{summary && finding?.value ? <p className="summary-count">{finding.value.trim().split(/\s+/).filter(Boolean).length} words</p> : null}{evidence.map((item, index) => <button type="button" className="finding-evidence" onClick={() => onEvidence(item)} key={`${item.turnId || item.startMs}-${index}`}><EvidenceChip evidence={item} /><q>{item.quote}</q></button>)}</article>;
+  return <article className={summary ? "finding-card summary-finding" : "finding-card"}><span>{title}</span><strong>{findingText(finding)}</strong>{finding?.description ? <p>{finding.description}</p> : null}{evidence.map((item, index) => <button type="button" className="finding-evidence" onClick={() => onEvidence(item)} key={`${item.turnId || item.startMs}-${index}`}><EvidenceChip evidence={item} /><q>{item.quote}</q></button>)}</article>;
 }
 
 function MoodTimeline({ events, duration, onSelect }: { events: MoodEvent[]; duration: number; onSelect: (event: MoodEvent) => void }) {
