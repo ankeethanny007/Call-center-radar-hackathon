@@ -1,25 +1,65 @@
 # Call-Centre Radar
 
-Call-Centre Radar is an evidence-first conversation-intelligence product for consumer-bank support calls. It ingests stereo recordings offline, persists speaker-attributed transcripts and validated analysis, and serves a fast manager dashboard. It never transcribes or analyzes a call during an API request.
+Call-Centre Radar turns consumer-bank support recordings into a searchable, evidence-backed manager dashboard. Processing happens once in a resumable offline pipeline; normal API requests only read persisted results.
 
-The supplied dataset has been verified locally: 1,441 stereo, 8 kHz MP3s pair cleanly with 1,441 JSON files under `audio/` and `metadata/`. The source mapping is fixed: **left channel → agent** and **right channel → customer**.
+The source contract is fixed: recordings are stereo 8 kHz MP3 files, the left channel is the agent, the right channel is the customer, and each recording has a matching metadata JSON file. Credentials, recordings, local databases, model caches, and `.env` are intentionally excluded from Git.
 
-## Product coverage
+## 1. Run the project after cloning Git and adding `.env`
 
-- Resumable states: `DISCOVERED → VALIDATED → TRANSCRIBING → TRANSCRIBED → ANALYZING → ANALYZED → READY`, plus retryable `FAILED`.
-- FFmpeg channel extraction and faster-whisper transcription for deterministic speaker attribution.
-- Persisted transcript turns, controlled intent taxonomy, resolution, generated ≤40-word narrative summary, customer mood events, mood shift, topics, and a 0–100 attention score.
-- Every retained intent, resolution, summary, mood event, and attention contribution has an exact quoted transcript span, timestamp, speaker, and segment ID. Unsupported claims are omitted.
-- FastAPI v1 API, PostgreSQL/Supabase-compatible persistence, local or private Supabase audio storage, and a Next.js/TypeScript dashboard.
-- Dashboard routes: Overview, Manager Attention, Customers and history, Calls and filters, Trends, Agents, and a seekable call-review screen.
+### Prerequisites
 
-The attention score uses fixed, auditable weights. Repeat-contact and long-wait signals are included only when the caller explicitly says so in the recording; source metadata alone is never used as claim evidence. Scores are capped at 100.
+- Python 3.12+
+- Node.js 22+
+- FFmpeg available on `PATH`
+- A root `.env` file shared separately from Git
 
-## Repository and data handling
+The shared Supabase `.env` must include `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_BUCKET`, `STORAGE_PROVIDER=supabase`, `NEXT_PUBLIC_API_URL`, `API_INTERNAL_URL`, and `CORS_ORIGINS`. `OPENAI_API_KEY` is required only when processing additional recordings. Never commit `.env`.
 
-Raw recordings, extracted data, local databases, Whisper cache, `.env`, and working files are all ignored by Git. Do not commit bank recordings or credentials.
+### Install and build
 
-The expected local source layout is:
+From the repository root:
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r backend/requirements-dev.txt
+npm ci --prefix frontend
+
+# Place the securely shared .env in this repository root.
+set -a
+source .env
+set +a
+
+# Safe to rerun against the existing Supabase database.
+PYTHONPATH=backend .venv/bin/alembic -c backend/alembic.ini upgrade head
+npm run build --prefix frontend
+```
+
+### Start the application
+
+Open two terminals in the repository root. Source `.env` in both terminals.
+
+Terminal 1 — API:
+
+```bash
+set -a; source .env; set +a
+PYTHONPATH=backend .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Terminal 2 — dashboard:
+
+```bash
+set -a; source .env; set +a
+npm run start --prefix frontend -- --port 3000
+```
+
+Open `http://localhost:3000`. API health is available at `http://localhost:8000/health`, and interactive API documentation is at `http://localhost:8000/docs`.
+
+The supplied Supabase credentials load the existing calls, transcripts, analyses, and recordings. The original dataset and a local SQLite file are not required merely to view the application.
+
+### Process new recordings
+
+Create this local structure and add same-named MP3/JSON pairs:
 
 ```text
 data/callradar-data/
@@ -27,217 +67,135 @@ data/callradar-data/
 └── metadata/<call-id>.json
 ```
 
-If starting from the provided archive:
+Open the **Calls** page and select **Process new files**. Only previously unseen call IDs are ingested and processed; completed calls are not reprocessed.
+
+Useful CLI alternatives:
 
 ```bash
-mkdir -p data
-unzip data/callradar-data.zip -d data
-```
-
-This produces `data/callradar-data/`. The archive and the extracted files remain local only.
-
-## Quick start with Docker
-
-Prerequisites: Docker Desktop and the locally extracted dataset above.
-
-```bash
-cp .env.example .env
-# Edit .env: set OPENAI_API_KEY for production analysis, and replace the default
-# PostgreSQL password before using a shared environment. Set
-# COMPOSE_DATABASE_URL only when using a managed Postgres database.
-
-docker compose up --build -d
-curl --fail http://localhost:8000/health
-```
-
-Open the dashboard at `http://localhost:3000` and the API documentation at `http://localhost:8000/docs`.
-
-Ingest and validate the real dataset before running the full job:
-
-```bash
-docker compose exec api python -m app.cli ingest-dataset \
-  --dataset-root /data/callradar-data --media-root /data
-
-docker compose exec api python -m app.cli validate --media-root /data --limit 20
-docker compose exec api python -m app.cli process --media-root /data --limit 20
-```
-
-Review the sample in the dashboard and the golden-set worksheet. Then resume every non-terminal call with the opt-in worker:
-
-```bash
-docker compose --profile worker run --rm worker
-```
-
-The worker exits after the current queue is empty. It is intentionally single-worker/resumable; rerun it to continue after an interruption. To retry only known failures after inspecting their stored errors:
-
-```bash
-docker compose exec api python -m app.cli retry --media-root /data
-```
-
-After initial setup, the Calls page also provides a **Process new files** button. Place new stereo MP3 files in `data/callradar-data/audio/` and their same-named metadata JSON files in `data/callradar-data/metadata/`, then use the button. The API ingests previously unseen call IDs and sends only those IDs through the persistent pipeline; existing calls are not reprocessed.
-
-## Supabase-backed handoff
-
-To rebuild the complete application on another computer without reprocessing existing calls, share two items separately:
-
-1. This GitHub repository (with the required feature branch merged or checked out).
-2. The configured root `.env` file through a secure channel. Never commit it to Git.
-
-The Supabase-backed `.env` must contain `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_BUCKET=call-audio`, and `STORAGE_PROVIDER=supabase`. `OPENAI_API_KEY` is needed only to process additional calls. Use `NEXT_PUBLIC_API_URL=http://localhost:8000`, `API_INTERNAL_URL=http://127.0.0.1:8000`, and include `http://localhost:3000` in `CORS_ORIGINS` for the standard local ports.
-
-From a fresh clone:
-
-```bash
-python3.12 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r backend/requirements-dev.txt
-npm ci --prefix frontend
-
-# Put the securely shared .env in the repository root, then export it.
-set -a
-source .env
-set +a
-
-# Safe to rerun against the existing Supabase database.
-PYTHONPATH=backend .venv/bin/alembic -c backend/alembic.ini upgrade head
-
-# Build the dashboard with the browser-visible local API origin.
-npm run build --prefix frontend
-```
-
-Run the following in separate terminals after sourcing `.env` in each:
-
-```bash
-PYTHONPATH=backend .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-```bash
-npm run start --prefix frontend -- --port 3000
-```
-
-Open `http://localhost:3000`. Existing calls, transcripts, analyses, and recordings load directly from Supabase; the local SQLite file and original dataset are not required for viewing. To add calls, create `data/callradar-data/audio/` and `data/callradar-data/metadata/`, add same-named MP3/JSON pairs, and use **Process new files**.
-
-## Native development
-
-Prerequisites: Python 3.12+, Node.js 22+, FFmpeg, and the source data. FFmpeg is installed in the API container; native development needs it on `PATH`.
-
-```bash
-python3.12 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r backend/requirements-dev.txt
-npm ci --prefix frontend
-cp .env.example .env
-```
-
-Create a local database and apply the migration:
-
-```bash
-DATABASE_URL=sqlite:///./data/callradar.db \
-PYTHONPATH=backend .venv/bin/alembic -c backend/alembic.ini upgrade head
-```
-
-Ingest and process a sample:
-
-```bash
-DATABASE_URL=sqlite:///./data/callradar.db \
-PYTHONPATH=backend .venv/bin/python scripts/process_dataset.py \
-  --input data/callradar-data --media-root data --limit 20
-```
-
-Run the API and dashboard in separate terminals:
-
-```bash
-DATABASE_URL=sqlite:///./data/callradar.db MEDIA_ROOT=data \
-PYTHONPATH=backend .venv/bin/uvicorn app.main:app --reload --port 8000
-```
-
-```bash
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev --prefix frontend
-```
-
-The pipeline defaults to OpenAI-backed structured analysis when `OPENAI_API_KEY` is set. For a no-network smoke test, set `ANALYSIS_PROVIDER=rules`; the evidence gate and persistent data contract remain active.
-
-## Operational commands
-
-All commands persist progress and are safe to rerun. Expensive processing happens only in these commands, never in FastAPI routes.
-
-```bash
-# Initialize the configured schema (the API also applies migrations in Docker)
-PYTHONPATH=backend .venv/bin/python -m app.cli init-db
-
-# Dataset-specific source adapter
-PYTHONPATH=backend .venv/bin/python -m app.cli ingest-dataset \
-  --dataset-root data/callradar-data --media-root data
-
-# Validate source files, then process a bounded sample or all resumable records
+# Check and process resumable calls.
 PYTHONPATH=backend .venv/bin/python -m app.cli validate --media-root data --limit 20
-PYTHONPATH=backend .venv/bin/python -m app.cli process --media-root data --limit 20
 PYTHONPATH=backend .venv/bin/python -m app.cli process --media-root data
+
+# Retry stored failures after inspecting their error messages.
 PYTHONPATH=backend .venv/bin/python -m app.cli retry --media-root data
 
-# Re-run only persisted READY calls after intentionally changing the analysis
-# prompt/model/evidence policy; transcripts are preserved.
-PYTHONPATH=backend .venv/bin/python -m app.cli reanalyse --media-root data --limit 20
-
-# Refresh only generated narrative summaries for existing analysed calls;
-# transcripts, classifications, moods, and scores are left unchanged.
-PYTHONPATH=backend .venv/bin/python -m app.cli regenerate-summaries --media-root data
-
-# Re-transcribe and re-analyze one specific call after changing the speech model
-# or timestamp segmentation policy.
+# Reprocess one call after a transcription or segmentation change.
 PYTHONPATH=backend .venv/bin/python -m app.cli reprocess \
   --media-root data --call-id <call-id>
-
-# Generate a human-review worksheet after READY calls exist
-PYTHONPATH=backend .venv/bin/python scripts/export_golden_set.py \
-  --size 25 --output work/golden-set-review.csv
 ```
 
-Check progress at `GET /api/v1/processing/progress`. Failed records retain an error message and are never silently retried by a dashboard/API request.
-
-## API
-
-The versioned API is documented at `/docs`. Core routes are:
-
-```text
-GET /api/v1/calls
-GET /api/v1/calls/{call_id}
-GET /api/v1/calls/{call_id}/audio
-GET /api/v1/attention
-GET /api/v1/customers
-GET /api/v1/customers/{customer_id}
-GET /api/v1/customers/{customer_id}/calls
-GET /api/v1/trends
-GET /api/v1/agents
-GET /api/v1/agents/{agent_id}
-GET /api/v1/processing/progress
-```
-
-`GET /api/v1/calls` supports customer, agent, date, intent, resolution, mood, minimum attention score, duration, status, search, `limit`, and `offset` filters. The audio route redirects to a local restricted MP3 route in development or a time-limited private Supabase URL in production.
-
-## Storage and hosted deployment
-
-PostgreSQL/Supabase Postgres is the deployment database. For private Supabase Storage, create a **private** bucket and configure `STORAGE_PROVIDER=supabase`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, and `SUPABASE_BUCKET`. The service-role key must remain server-side.
-
-After ingestion, upload the original recordings once:
-
-```bash
-PYTHONPATH=backend .venv/bin/python -m app.cli sync-storage --media-root data
-```
-
-Use a separate API service, worker service, and frontend service against the same PostgreSQL database. Set `NEXT_PUBLIC_API_URL` to the browser-reachable API origin, and use `API_INTERNAL_URL` only for the dashboard server's private API route. The Docker Compose stack demonstrates both values correctly.
-
-Detailed deployment steps are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The QA/release gate and human evidence-review procedure are in [docs/QA-RUNBOOK.md](docs/QA-RUNBOOK.md).
-
-## Tests and release gate
+Run verification before sharing changes:
 
 ```bash
 PYTHONPATH=backend .venv/bin/python -m pytest backend/tests -q
 npm run build --prefix frontend
 ```
 
-The GitHub Actions workflow runs backend tests, a clean Alembic migration, and the production dashboard build. Before marking the all-call run complete, review a 20–30-call golden set against the audio, ensure every remaining failure is triaged, and validate the exact evidence-to-audio interaction in the dashboard.
+For Docker-based setup, local SQLite development, migration recovery, and the complete QA procedure, see [Deployment](docs/DEPLOYMENT.md) and [QA runbook](docs/QA-RUNBOOK.md).
 
-## Security note
+## 2. Technical architecture, contracts, and formats
 
-Treat all recordings, transcripts, participant names, database URLs, OpenAI keys, and Supabase service-role keys as sensitive. In a deployment, set `API_ACCESS_TOKEN` (or use an identity-aware proxy) so API and audio routes are not public; the dashboard passes that token only from its server-rendering process. Use a secret manager, keep the audio bucket private, restrict `CORS_ORIGINS`, and rotate any key that has ever been pasted into a chat, terminal, or log.
+### Runtime architecture
+
+```text
+Stereo MP3 + metadata JSON
+          │
+          ▼
+Resumable Python worker
+  validate → split channels → transcribe → reconstruct turns
+  → analyze → validate evidence → persist
+          │
+          ├── PostgreSQL / Supabase: metadata, transcript, analysis, evidence
+          └── Private Supabase Storage: original recordings
+                         │
+                         ▼
+              FastAPI read API
+                         │
+                         ▼
+              Next.js dashboard
+```
+
+- **Frontend:** Next.js 15, React 19, and TypeScript.
+- **API:** FastAPI and SQLAlchemy.
+- **Persistence:** PostgreSQL/Supabase with Alembic migrations. SQLite remains supported for isolated development and tests.
+- **Audio:** local storage in development or a private Supabase bucket with short-lived signed playback URLs.
+- **Transcription:** FFmpeg channel extraction plus faster-whisper. Channel separation provides deterministic speaker attribution without diarization.
+- **Analysis:** OpenAI structured analysis followed by deterministic evidence validation and scoring.
+- **Performance:** database-side filtering/pagination, lightweight projections, optimized relationship loading, short-lived read caching, signed-URL caching, and parallel dashboard requests.
+
+FastAPI never transcribes or analyzes during a read request. The API and worker share the same persistent database, and only one worker should process a given database at a time.
+
+### Input contract
+
+Each call requires:
+
+- `audio/<call-id>.mp3`: stereo, 8 kHz MP3; left = agent and right = customer.
+- `metadata/<call-id>.json`: metadata paired by the exact same `<call-id>` filename.
+
+The worker rejects missing or ambiguous pairs instead of guessing the dataset structure or speaker mapping.
+
+### Processing states
+
+```text
+DISCOVERED → VALIDATED → TRANSCRIBING → TRANSCRIBED
+           → ANALYZING → ANALYZED → READY
+```
+
+`FAILED` is retryable. Progress is persisted, so restarting a worker resumes non-terminal calls without duplicating completed transcript or evidence rows.
+
+### Persisted output contract
+
+Each ready call can contain:
+
+- Timestamped transcript turns with `speaker`, `start_seconds`, `end_seconds`, and exact text.
+- Intent and topics.
+- Customer mood events and mood-shift time.
+- Resolution status.
+- A generated narrative summary of no more than 40 words.
+- A deterministic manager-attention score from 0–100 with individual score contributions.
+- Evidence references containing the exact transcript quote, segment ID, speaker, and timestamps.
+
+Intent, resolution, mood, summary facts, and score signals are returned only when supported by timestamped transcript evidence. Unsupported claims are omitted. Metadata alone is not used as conversational evidence.
+
+### API contract
+
+All business endpoints use the `/api/v1` prefix:
+
+```text
+GET  /health
+GET  /api/v1/calls
+GET  /api/v1/calls/{call_id}
+GET  /api/v1/calls/{call_id}/audio
+GET  /api/v1/attention
+GET  /api/v1/customers
+GET  /api/v1/customers/{customer_id}
+GET  /api/v1/customers/{customer_id}/calls
+GET  /api/v1/trends
+GET  /api/v1/agents
+GET  /api/v1/agents/{agent_id}
+GET  /api/v1/processing/progress
+GET  /api/v1/processing/new-files
+POST /api/v1/processing/new-files
+```
+
+`GET /api/v1/calls` supports customer, agent, date, intent, resolution, mood, minimum attention score, duration, processing status, text search, `limit`, and `offset` filters. The audio route returns a protected local stream or redirects to a time-limited private Supabase URL.
+
+When `API_ACCESS_TOKEN` is configured, protected routes require:
+
+```http
+X-API-Key: <API_ACCESS_TOKEN>
+```
+
+Do not place database credentials, the OpenAI key, the Supabase service key, or `API_ACCESS_TOKEN` in any `NEXT_PUBLIC_*` variable.
+
+## 3. Features and UI
+
+- **Overview:** operational totals, resolution and mood indicators, high-attention calls, issue mix, and recent activity.
+- **Calls:** searchable and filterable call archive with processing state and a single **Process new files** action.
+- **Call detail:** playable recording, seekable agent/customer transcript, generated summary, intent, resolution, attention score, supporting evidence, and mood timeline.
+- **Manager Attention:** ranked queue of calls requiring review, with transparent score contributions and timestamped evidence.
+- **Customers:** customer directory, interaction history, repeat-call context, and unresolved-call visibility.
+- **Trends:** issue volumes, resolution trends, mood patterns, and changes over time.
+- **Agents:** handled-call volume, resolution rate, customer outcomes, and attention-related metrics.
+
+The dashboard distinguishes pending analysis from a completed conclusion, does not display unsupported AI judgments, and lets a reviewer seek from any evidence item to the corresponding moment in the recording.
