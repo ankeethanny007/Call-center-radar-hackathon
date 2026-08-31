@@ -60,7 +60,11 @@ class ApiError extends Error {
 
 export type NewFilesJob = {
   status: "IDLE" | "RUNNING" | "COMPLETE" | "FAILED";
+  action?: "already_running" | "new_files" | "resumed" | "nothing_to_process" | "failed" | null;
   discovered: number;
+  resumed: number;
+  queued: number;
+  remaining?: number;
   processed: number;
   failed: number;
   error?: string | null;
@@ -77,15 +81,22 @@ async function fetchJson<T>(path: string): Promise<T> {
 }
 
 async function postJson<T>(path: string): Promise<T> {
-  const response = await fetch(prefixedUrl(path), {
-    method: "POST",
-    headers: { Accept: "application/json" },
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new ApiError(response.status, string(record(payload).detail) || `${response.status} ${response.statusText}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(prefixedUrl(path), {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, string(record(payload).detail) || `${response.status} ${response.statusText}`);
+    }
+    return (await response.json()) as T;
+  } finally {
+    clearTimeout(timeout);
   }
-  return (await response.json()) as T;
 }
 
 export const processingNewFilesStatus = () => fetchJson<NewFilesJob>("/api/v1/processing/new-files");

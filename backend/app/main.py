@@ -20,12 +20,21 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from .config import settings
 from .database import SessionLocal, db_session, engine
 from .models import Agent, AttentionContribution, Call, CallAnalysis, Customer, Evidence, MoodEvent, Topic
-from .pipeline import ingest_dataset, process_batch
+from .pipeline import ACTIVE_STATUSES, ingest_dataset, process_batch
 from .security import require_api_access, require_media_access
 from .storage import storage
 
 new_files_lock = Lock()
-new_files_job: dict[str, Any] = {"status": "IDLE", "discovered": 0, "processed": 0, "failed": 0, "error": None}
+new_files_job: dict[str, Any] = {
+    "status": "IDLE",
+    "action": None,
+    "discovered": 0,
+    "resumed": 0,
+    "queued": 0,
+    "processed": 0,
+    "failed": 0,
+    "error": None,
+}
 read_cache_lock = Lock()
 read_cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
 
@@ -91,15 +100,34 @@ settings.media_root.mkdir(parents=True, exist_ok=True)
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_api_access)])
 
 
-def process_new_call_ids(call_ids: list[str]) -> None:
+def discover_new_file_ids(existing_ids: set[str]) -> list[str]:
+    """Return matched local file-pair IDs without parsing metadata or touching the DB."""
+    audio_dir = settings.dataset_root / "audio"
+    metadata_dir = settings.dataset_root / "metadata"
+    if not audio_dir.is_dir() or not metadata_dir.is_dir():
+        return []
+    audio_ids = {item.stem for item in audio_dir.glob("*.mp3")}
+    metadata_ids = {item.stem for item in metadata_dir.glob("*.json")}
+    return sorted((audio_ids & metadata_ids) - existing_ids)
+
+
+def ingest_and_process(call_ids: list[str], candidate_new_ids: list[str]) -> None:
     db = SessionLocal()
     try:
-        calls = db.query(Call).filter(Call.id.in_(call_ids)).all()
+        ingestion = None
+        new_ids: list[str] = []
+        if candidate_new_ids:
+            ingestion = ingest_dataset(db, settings.dataset_root, settings.media_root)
+            new_ids = [
+                call_id
+                for (call_id,) in db.query(Call.id).filter(Call.id.in_(candidate_new_ids)).all()
+            ]
+        calls = db.query(Call).filter(Call.id.in_(new_ids)).all() if new_ids else []
         for call in calls:
             storage.upload(call.audio_path, settings.media_root / call.audio_path)
         result = process_batch(db, settings.media_root, call_ids=call_ids)
         with new_files_lock:
-            new_files_job.update(status="COMPLETE", **result)
+            new_files_job.update(status="COMPLETE", ingestion=ingestion, **result)
     except Exception as exc:
         with new_files_lock:
             new_files_job.update(status="FAILED", error=str(exc)[:1000])
@@ -530,27 +558,56 @@ def new_files_status() -> dict[str, Any]:
 
 @router.post("/processing/new-files", status_code=202)
 def process_new_files(db: Session = Depends(db_session)) -> dict[str, Any]:
-    """Ingest matched files not already persisted and process only those calls."""
+    """Ingest unseen file pairs and resume every persisted non-terminal call."""
     with new_files_lock:
         if new_files_job["status"] == "RUNNING":
-            raise HTTPException(status_code=409, detail="A new-files processing job is already running")
-
-    existing_ids = {call_id for (call_id,) in db.query(Call.id).all()}
-    ingestion = ingest_dataset(db, settings.dataset_root, settings.media_root)
-    new_ids = [call_id for (call_id,) in db.query(Call.id).filter(~Call.id.in_(existing_ids)).all()]
-
-    with new_files_lock:
+            remaining = db.query(Call.id).filter(Call.processing_status.in_(ACTIVE_STATUSES)).count()
+            return {**new_files_job, "action": "already_running", "remaining": remaining}
         new_files_job.update(
-            status="RUNNING" if new_ids else "COMPLETE",
-            discovered=len(new_ids),
+            status="RUNNING",
+            action=None,
+            discovered=0,
+            resumed=0,
+            queued=0,
             processed=0,
             failed=0,
             error=None,
-            ingestion=ingestion,
+        )
+
+    try:
+        existing_ids = {call_id for (call_id,) in db.query(Call.id).all()}
+        resumed_ids = [
+            call_id
+            for (call_id,) in db.query(Call.id).filter(Call.processing_status.in_(ACTIVE_STATUSES)).all()
+        ]
+        new_ids = discover_new_file_ids(existing_ids)
+        queued_ids = [*new_ids, *resumed_ids]
+        action = "new_files" if new_ids else "resumed" if resumed_ids else "nothing_to_process"
+    except Exception as exc:
+        with new_files_lock:
+            new_files_job.update(status="FAILED", action="failed", error=str(exc)[:1000])
+            return dict(new_files_job)
+
+    with new_files_lock:
+        new_files_job.update(
+            status="RUNNING" if queued_ids else "COMPLETE",
+            action=action,
+            discovered=len(new_ids),
+            resumed=len(resumed_ids),
+            queued=len(queued_ids),
+            processed=0,
+            failed=0,
+            error=None,
+            ingestion=None,
         )
         response = dict(new_files_job)
-    if new_ids:
-        Thread(target=process_new_call_ids, args=(new_ids,), daemon=True, name="callradar-new-files").start()
+    if queued_ids:
+        Thread(
+            target=ingest_and_process,
+            args=(queued_ids, new_ids),
+            daemon=True,
+            name="callradar-processing",
+        ).start()
     return response
 
 
