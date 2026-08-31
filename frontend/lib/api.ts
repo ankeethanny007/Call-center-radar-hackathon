@@ -60,7 +60,11 @@ class ApiError extends Error {
 
 export type NewFilesJob = {
   status: "IDLE" | "RUNNING" | "COMPLETE" | "FAILED";
+  action?: "already_running" | "new_files" | "resumed" | "nothing_to_process" | "failed" | null;
   discovered: number;
+  resumed: number;
+  queued: number;
+  remaining?: number;
   processed: number;
   failed: number;
   error?: string | null;

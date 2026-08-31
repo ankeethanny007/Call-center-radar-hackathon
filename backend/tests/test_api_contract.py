@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+import app.main as main
 from app.database import Base, db_session
 from app.main import app
 from app.models import Agent, AttentionContribution, Call, CallAnalysis, Customer, Evidence, TranscriptSegment
@@ -109,3 +110,60 @@ def test_call_date_filter_normalizes_offset_to_utc(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_processing_action_resumes_existing_non_terminal_calls(tmp_path: Path, monkeypatch) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'resume.db'}")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, autocommit=False)()
+    db.add_all([
+        Call(id="ready", audio_path="audio/ready.mp3", processing_status="READY"),
+        Call(id="pending-a", audio_path="audio/pending-a.mp3", processing_status="DISCOVERED"),
+        Call(id="pending-b", audio_path="audio/pending-b.mp3", processing_status="ANALYZING"),
+    ])
+    db.commit()
+
+    started: dict[str, object] = {}
+
+    class FakeThread:
+        def __init__(self, *, target, args, **_kwargs):
+            started.update(target=target, args=args)
+
+        def start(self):
+            started["started"] = True
+
+    monkeypatch.setattr(main, "ingest_dataset", lambda *_args: {"ingested": 0})
+    monkeypatch.setattr(main, "Thread", FakeThread)
+    with main.new_files_lock:
+        main.new_files_job.update(status="IDLE")
+
+    response = main.process_new_files(db)
+
+    assert response["status"] == "RUNNING"
+    assert response["action"] == "resumed"
+    assert response["discovered"] == 0
+    assert response["resumed"] == 2
+    assert response["queued"] == 2
+    queued_ids, new_ids = started["args"]
+    assert set(queued_ids) == {"pending-a", "pending-b"}
+    assert new_ids == []
+    assert started["started"] is True
+    db.close()
+
+
+def test_processing_action_reports_an_existing_job(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'running.db'}")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, autoflush=False, autocommit=False)()
+    db.add(Call(id="pending", audio_path="audio/pending.mp3", processing_status="TRANSCRIBING"))
+    db.commit()
+    with main.new_files_lock:
+        main.new_files_job.update(status="RUNNING", queued=4)
+
+    response = main.process_new_files(db)
+
+    assert response["action"] == "already_running"
+    assert response["remaining"] == 1
+    with main.new_files_lock:
+        main.new_files_job.update(status="IDLE")
+    db.close()
