@@ -61,6 +61,10 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </header>
       <main className="page-container">{children}</main>
+      <footer className="site-footer">
+        <span className="footer-balance" aria-hidden="true">Submitted by Ankeet Hanny for AI Hackathon</span>
+        <span>Submitted by Ankeet Hanny for AI Hackathon</span>
+      </footer>
     </div>
   );
 }
