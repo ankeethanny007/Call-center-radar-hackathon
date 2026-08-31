@@ -9,15 +9,22 @@ function values(calls: CallListItem[], field: (call: CallListItem) => string | n
   return Array.from(new Set(calls.map(field).filter((item): item is string => Boolean(item)))).sort();
 }
 
-export function CallDirectory({ calls }: { calls: CallListItem[] }) {
-  const [query, setQuery] = useState("");
+export type CallDirectoryFilters = {
+  query?: string;
+  status?: string;
+  resolution?: string;
+  minimumScore?: string;
+};
+
+export function CallDirectory({ calls, initialFilters = {} }: { calls: CallListItem[]; initialFilters?: CallDirectoryFilters }) {
+  const [query, setQuery] = useState(initialFilters.query || "");
   const [customer, setCustomer] = useState("all");
   const [agent, setAgent] = useState("all");
   const [intent, setIntent] = useState("all");
-  const [resolution, setResolution] = useState("all");
+  const [resolution, setResolution] = useState(initialFilters.resolution || "all");
   const [mood, setMood] = useState("all");
-  const [status, setStatus] = useState("all");
-  const [minimumScore, setMinimumScore] = useState("all");
+  const [status, setStatus] = useState(initialFilters.status || "all");
+  const [minimumScore, setMinimumScore] = useState(initialFilters.minimumScore || "all");
   const [maximumDuration, setMaximumDuration] = useState("all");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
@@ -54,7 +61,7 @@ export function CallDirectory({ calls }: { calls: CallListItem[] }) {
         {select("Resolution", resolution, setResolution, values(calls, (call) => call.resolution))}
         {select("Customer mood", mood, setMood, values(calls, (call) => call.mood))}
         {select("Processing status", status, setStatus, values(calls, (call) => call.status))}
-        <label className="filter-select"><span>Minimum score</span><select value={minimumScore} onChange={(event) => setMinimumScore(event.target.value)}><option value="all">Any score</option><option value="30">30+ Moderate</option><option value="50">50+ High</option><option value="70">70+ Critical</option><option value="85">85+ Immediate</option></select></label>
+        <label className="filter-select"><span>Minimum score</span><select value={minimumScore} onChange={(event) => setMinimumScore(event.target.value)}><option value="all">Any score</option><option value="1">Any attention signal</option><option value="30">30+ Moderate</option><option value="50">50+ High</option><option value="70">70+ Critical</option><option value="85">85+ Immediate</option></select></label>
         <label className="filter-select"><span>Maximum duration</span><select value={maximumDuration} onChange={(event) => setMaximumDuration(event.target.value)}><option value="all">Any duration</option><option value="5">Under 5 minutes</option><option value="10">Under 10 minutes</option><option value="20">Under 20 minutes</option></select></label>
         <label className="filter-select"><span>From date</span><input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
         <label className="filter-select"><span>To date</span><input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
