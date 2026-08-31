@@ -17,14 +17,15 @@ export function PageHeader({ eyebrow, title, description, action }: { eyebrow?: 
   );
 }
 
-export function MetricCard({ label, value, detail, tone = "default", icon }: { label: string; value: ReactNode; detail?: string; tone?: "default" | "danger" | "warning" | "success" | "blue"; icon?: ReactNode }) {
-  return (
-    <article className={`metric-card metric-${tone}`}>
+export function MetricCard({ label, value, detail, tone = "default", icon, href }: { label: string; value: ReactNode; detail?: string; tone?: "default" | "danger" | "warning" | "success" | "blue"; icon?: ReactNode; href?: string }) {
+  const content = <>
       <div className="metric-top"><span>{label}</span>{icon ? <span className="metric-icon">{icon}</span> : null}</div>
       <strong>{value}</strong>
       {detail ? <small>{detail}</small> : null}
-    </article>
-  );
+    </>;
+  return href
+    ? <Link className={`metric-card metric-card-link metric-${tone}`} href={href} aria-label={`${label}: ${String(value)}. View filtered calls`}>{content}</Link>
+    : <article className={`metric-card metric-${tone}`}>{content}</article>;
 }
 
 export function ScoreBadge({ score, band, compact = false }: { score?: number | null; band?: string | null; compact?: boolean }) {
