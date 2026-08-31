@@ -30,10 +30,10 @@ export default async function OverviewPage() {
       />
 
       <section className="metric-grid" aria-label="Call centre overview">
-        <MetricCard label="Needs attention" value={attention.length} detail={`${urgent} critical or immediate`} tone={urgent ? "danger" : "default"} icon={<Icon name="warning" />} />
-        <MetricCard label="Processed calls" value={ready} detail={progress ? `${progress.total} discovered in batch` : "Stored analysis only"} tone="blue" icon={<Icon name="activity" />} />
-        <MetricCard label="Unresolved" value={unresolved} detail={calls.length ? `Across ${calls.length} available calls` : "Analysis will populate this"} tone={unresolved ? "warning" : "default"} icon={<Icon name="shield" />} />
-        <MetricCard label="Observed resolution" value={formatPercent(observedResolutionRate)} detail="From evidence-backed call outcomes" tone="success" icon={<Icon name="trend" />} />
+        <MetricCard label="Needs attention" value={attention.length} detail={`${urgent} critical or immediate`} tone={urgent ? "danger" : "default"} icon={<Icon name="warning" />} href="/calls?minimumScore=1" />
+        <MetricCard label="Processed calls" value={ready} detail={progress ? `${progress.total} discovered in batch` : "Stored analysis only"} tone="blue" icon={<Icon name="activity" />} href="/calls?status=READY" />
+        <MetricCard label="Unresolved" value={unresolved} detail={calls.length ? `Across ${calls.length} available calls` : "Analysis will populate this"} tone={unresolved ? "warning" : "default"} icon={<Icon name="shield" />} href="/calls?resolution=UNRESOLVED" />
+        <MetricCard label="Observed resolution" value={formatPercent(observedResolutionRate)} detail="From evidence-backed call outcomes" tone="success" icon={<Icon name="trend" />} href="/calls?resolution=RESOLVED" />
       </section>
 
       <section className="dashboard-grid dashboard-main-grid">
