@@ -132,7 +132,7 @@ def test_processing_action_resumes_existing_non_terminal_calls(tmp_path: Path, m
         def start(self):
             started["started"] = True
 
-    monkeypatch.setattr(main, "ingest_dataset", lambda *_args: {"ingested": 0})
+    monkeypatch.setattr(main, "discover_new_file_ids", lambda _existing: [])
     monkeypatch.setattr(main, "Thread", FakeThread)
     with main.new_files_lock:
         main.new_files_job.update(status="IDLE")
