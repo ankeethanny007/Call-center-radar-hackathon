@@ -13,7 +13,7 @@ The source contract is fixed: recordings are stereo 8 kHz MP3 files, the left ch
 - FFmpeg available on `PATH`
 - A root `.env` file shared separately from Git
 
-The shared Supabase `.env` must include `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_BUCKET`, `STORAGE_PROVIDER=supabase`, `NEXT_PUBLIC_API_URL`, `API_INTERNAL_URL`, and `CORS_ORIGINS`. `OPENAI_API_KEY` is required only when processing additional recordings. Never commit `.env`.
+The shared Supabase `.env` must include `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_BUCKET`, `STORAGE_PROVIDER=supabase`, `NEXT_PUBLIC_API_URL`, `API_INTERNAL_URL`, and `CORS_ORIGINS`. `OPENAI_API_KEY` is required for configured OpenAI-backed analysis of unfinished or newly added calls; it is not required merely to browse existing `READY` results. Never commit `.env`.
 
 ### Install and build
 
@@ -55,11 +55,11 @@ npm run start --prefix frontend -- --port 3000
 
 Open `http://localhost:3000`. API health is available at `http://localhost:8000/health`, and interactive API documentation is at `http://localhost:8000/docs`.
 
-The supplied Supabase credentials load the existing calls, transcripts, analyses, and recordings. The original dataset and a local SQLite file are not required merely to view the application.
+The supplied Supabase credentials load the existing calls, transcripts, analyses, and recordings. The original dataset and a local SQLite file are not required merely to view the application. When recordings have already been uploaded to the configured private Supabase bucket, the local dataset is also not required to resume persisted unfinished calls.
 
-### Process new recordings
+### Resume processing or process new recordings
 
-Create this local structure and add same-named MP3/JSON pairs:
+To add new calls, create this local structure and add same-named MP3/JSON pairs:
 
 ```text
 data/callradar-data/
@@ -67,7 +67,15 @@ data/callradar-data/
 └── metadata/<call-id>.json
 ```
 
-Open the **Calls** page and select **Process new files**. Only previously unseen call IDs are ingested and processed; completed calls are not reprocessed.
+Open the **Calls** page and select **Process new files / Resume processing**. The action:
+
+- Discovers matched, previously unseen MP3/JSON pairs and starts processing them.
+- Resumes persisted non-terminal calls, including calls interrupted during validation, transcription, or analysis.
+- Leaves completed `READY` calls untouched.
+
+Calls marked `FAILED` are not silently retried. Inspect their stored error first, then use the retry command below.
+
+For a Supabase-backed handoff, the local folders may be absent when only resuming persisted calls, provided every required recording is already in private Supabase Storage. The worker downloads those recordings as needed. Recreate the folders only when adding new recordings. Do not remove them while a worker is reading or uploading local files; stop the worker first.
 
 Useful CLI alternatives:
 
@@ -191,7 +199,7 @@ Do not place database credentials, the OpenAI key, the Supabase service key, or 
 ## 3. Features and UI
 
 - **Overview:** operational totals, resolution and mood indicators, high-attention calls, issue mix, and recent activity.
-- **Calls:** searchable and filterable call archive with processing state and a single **Process new files** action.
+- **Calls:** searchable and filterable call archive with processing state and a single **Process new files / Resume processing** action.
 - **Call detail:** playable recording, seekable agent/customer transcript, generated summary, intent, resolution, attention score, supporting evidence, and mood timeline.
 - **Manager Attention:** ranked queue of calls requiring review, with transparent score contributions and timestamped evidence.
 - **Customers:** customer directory, interaction history, repeat-call context, and unresolved-call visibility.
