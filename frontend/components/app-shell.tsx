@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Icon } from "./icons";
 
 const navigation = [
@@ -22,6 +22,17 @@ function isActive(pathname: string, href: string): boolean {
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [expanded, setExpanded] = useState(false);
+  const [navigatingTo, setNavigatingTo] = useState<string | null>(null);
+
+  useEffect(() => {
+    setNavigatingTo(null);
+  }, [pathname]);
+
+  function startNavigation(href: string) {
+    setExpanded(false);
+    if (!isActive(pathname, href)) setNavigatingTo(href);
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -36,12 +47,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           <nav className={expanded ? "main-nav is-open" : "main-nav"} aria-label="Primary navigation">
             {navigation.map((item) => (
               <Link
-                className={isActive(pathname, item.href) ? "nav-link is-active" : "nav-link"}
+                className={`${isActive(pathname, item.href) ? "nav-link is-active" : "nav-link"}${navigatingTo === item.href ? " is-loading" : ""}`}
                 href={item.href}
                 key={item.href}
-                onClick={() => setExpanded(false)}
+                onClick={() => startNavigation(item.href)}
               >
-                <Icon name={item.icon} size={18} />
+                {navigatingTo === item.href ? <span className="nav-loader" aria-hidden="true" /> : <Icon name={item.icon} size={18} />}
                 <span>{item.label}</span>
               </Link>
             ))}
